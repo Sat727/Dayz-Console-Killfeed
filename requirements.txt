@@ -1,0 +1,9 @@
+discord.py
+aiohttp>=3.7.4,<4
+async-timeout>=4.0,<5.0; python_version<"3.11"
+numpy==1.26.2
+requests
+opencv-python
+python-dateutil
+aiofiles
+pytz
