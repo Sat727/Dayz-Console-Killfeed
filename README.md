@@ -1,29 +1,3 @@
-# Console DayZ Multipurpose Bot
-
-A feature-rich Discord bot designed for DayZ server management with deep Nitrado integration. Includes log tracking, PvP stats, player interaction alerts, automated device ID banning, and full support for heatmaps and flag area monitoring.
-
-## 🎯 Features
-
-### ✅ Real-Time Log Tracking
-- Continuously polls DayZ server logs (ADM) and parses for PvP kills, deaths, suicides, fall damage, animal attacks, explosions, and more.
-- Broadcasts deaths and events to specific Discord channels per-server via config.
-
-### 🧾 Rich PvP Logs & Stats
-- Detects who killed who, weapon used, hit location, distance, and displays a full stats breakdown for both killer and victim.
-- Tracks killstreaks, deathstreaks, K/D ratios, time alive, and global rank.
-
-### 📈 Heatmap Generation
-- Automatically or manually generate heatmaps of player locations to visualize activity zones on your map.
-- `/generateallheatmap` command can be used per server.
-
-~~### Device ID Ban Management
-- Admin commands to ban or unban players by their device ID (`/bandevice`, `/unbandevice`).
-- Device bans persist via SQLite and can be managed from Discord.~~ *(To be implemented)*
-
-### 🛠️ Customizable Logging Channels
-- Per-category logging (Builds, Deaths, Hits, Interactions, etc).
-- Configure with `/logconfig`.
-
 # 🎮 Console DayZ Multipurpose Bot
 
 A feature-rich Discord bot designed for DayZ server management with deep Nitrado integration. Includes log tracking, PvP stats, player interaction alerts, full stats tracking, and heatmap visualization.
