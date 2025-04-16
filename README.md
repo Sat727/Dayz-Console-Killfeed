@@ -45,7 +45,7 @@ A feature-rich Discord bot designed for DayZ server management with deep Nitrado
 - `/stats [user]` – Pulls stats: K/D, time alive, streaks, etc.
 - `/nitradoserver` – Add/remove Nitrado server by ID
 - `/logconfig` – Assign log output categories to Discord channels
-- `/addkit` `/modifykit` – Create and edit predefined loot kits
+- ~~`/addkit` `/modifykit` – Create and edit predefined loot kits~~ *Work in progress*
 - `/generatekeys` – Generate codes in bulk
 - `/redeem` – Players use this to claim codes
 - `/sync` – Resync slash commands (if required)
