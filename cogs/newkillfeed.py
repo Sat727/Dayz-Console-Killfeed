@@ -129,10 +129,10 @@ class Killfeed(commands.Cog):
                     print(f"[{server_id}] Channel '{label}' is not configured. Skipping.")
 
             if not self.testing:
-                log_acquired = await self.fetch_server_log(server_id)
+                log_acquired = await fetch_server_log(self, server_id)
 
             if log_acquired:
-                tasks_to_run.append(self.check_log(server_id, channel_map))
+                tasks_to_run.append(self.check_server_log(server_id, channel_map))
 
         await asyncio.gather(*tasks_to_run)
 
@@ -147,7 +147,7 @@ class Killfeed(commands.Cog):
             st.execute(f"SELECT * FROM stats WHERE user = ?", (player,))
             r = st.fetchall()
             if r == [] or r == [()]:
-                st.execute(f"INSERT INTO stats (user, kills, deaths, alivetime, killstreak, deathstreak, dcid, money, bounty, device_id, last_location, vouchers) VALUES (?, 0, 0, ?, 0, 0, 0, 0, 0, 0, ?, ?)", (player, int(time.mktime(datetime.now().timetuple())), None, None))
+                st.execute(f"INSERT INTO stats (user, kills, deaths, alivetime, killstreak, deathstreak, dcid, money, bounty, device_id) VALUES (?, 0, 0, ?, 0, 0, 0, 0, 0, 0)", (player, int(time.mktime(datetime.now().timetuple()))))
                 #print(f"Initialized for {player}")
                 stats.commit()
 
@@ -515,12 +515,32 @@ async def fetch_server_log(self, server_id):
             else:
                 logging.error(f"[{server_id}] Unsupported game type: {game_type}")
                 return False
+            
+            # List directory to find the most recent .ADM file
+            config_dir = f"/games/{username}/noftp/{'/'.join(relative_path.split('/')[:-1])}"
+            list_endpoint = f"https://api.nitrado.net/services/{server_id}/gameservers/file_server/list?dir={config_dir}"
+            list_response = await session.get(list_endpoint, headers=self.headers)
 
-            download_endpoint = f"https://api.nitrado.net/services/{server_id}/gameservers/file_server/download?file=/games/{username}/noftp/{relative_path}"
+            if list_response.status != 200:
+                logging.error(f"[{server_id}] Failed to list directory ({list_response.status})")
+                return False
+
+            list_data = await list_response.json()
+            adm_files = [entry for entry in list_data["data"]["entries"] 
+                        if entry["type"] == "file" and entry["name"].endswith(".ADM")]
+
+            if not adm_files:
+                logging.error(f"[{server_id}] No .ADM files found in {config_dir}")
+                return False
+
+            most_recent_file = max(adm_files, key=lambda x: x["modified_at"])
+            file_path = most_recent_file["path"]
+
+            download_endpoint = f"https://api.nitrado.net/services/{server_id}/gameservers/file_server/download?file={file_path}"
             token_response = await session.get(download_endpoint, headers=self.headers)
 
             if token_response.status != 200:
-                logging.error(f"[{server_id}] Failed to retrieve download token ({token_response.status})")
+                logging.error(f"[{server_id}] Failed to retrieve download token ({token_response.status}) ({token_response.content})")
                 return False
 
             token_data = await token_response.json()
