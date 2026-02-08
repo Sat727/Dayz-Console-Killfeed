@@ -151,6 +151,88 @@ updateDatabase()
 #    pass
 
 
+class ServerSelect(discord.ui.Select):
+    """Select menu for choosing a server from the database"""
+    def __init__(self, user_id: int, callback_func, action_type: str = "general"):
+        self.user_id = user_id
+        self.callback_func = callback_func
+        self.action_type = action_type
+        
+        # Get servers from database
+        s.execute("SELECT * FROM servers")
+        servers_list = s.fetchall()
+        
+        options = []
+        for server in servers_list:
+            server_id = str(server[0])
+            options.append(discord.SelectOption(label=f"Server {server_id}", value=server_id))
+        
+        if not options:
+            options.append(discord.SelectOption(label="No servers configured", value="none"))
+        
+        super().__init__(
+            placeholder="Choose a server...",
+            min_values=1,
+            max_values=1,
+            options=options
+        )
+    
+    async def callback(self, interaction: discord.Interaction):
+        # Only allow the user who invoked the command
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("You are not permitted to do this.", ephemeral=True)
+            return
+        
+        if self.values[0] == "none":
+            await interaction.response.send_message("No servers are configured. Use `/nitradoserver` to add one.", ephemeral=True)
+            return
+        
+        await self.callback_func(interaction, int(self.values[0]))
+
+
+class ServerSelectView(discord.ui.View):
+    """View containing the server select menu"""
+    def __init__(self, user_id: int, callback_func, action_type: str = "general"):
+        super().__init__()
+        self.add_item(ServerSelect(user_id, callback_func, action_type))
+
+
+class ChannelSelect(discord.ui.Select):
+    """Select menu for choosing a channel for log output"""
+    def __init__(self, user_id: int, server_id: int, callback_func):
+        self.user_id = user_id
+        self.server_id = server_id
+        self.callback_func = callback_func
+        
+        # Get available categories
+        options = [
+            discord.SelectOption(label=cat, value=cat) 
+            for cat in categories
+        ]
+        
+        super().__init__(
+            placeholder="Choose a log category...",
+            min_values=1,
+            max_values=1,
+            options=options
+        )
+    
+    async def callback(self, interaction: discord.Interaction):
+        # Only allow the user who invoked the command
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("You are not allowed to interact with this menu.", ephemeral=True)
+            return
+        
+        await self.callback_func(interaction, self.server_id, self.values[0])
+
+
+class ChannelSelectView(discord.ui.View):
+    """View containing the channel select menu"""
+    def __init__(self, user_id: int, server_id: int, callback_func):
+        super().__init__()
+        self.add_item(ChannelSelect(user_id, server_id, callback_func))
+
+
 class Commands(commands.Cog):
 
 
@@ -413,7 +495,7 @@ class Commands(commands.Cog):
                     except Exception as e:
                         print(e)
                 elif choice.data.get('custom_id') == "1":
-                    await choice.response.send_message("Aborted Mission!")
+                    await choice.response.send_message("Aborted key generation", ephemeral=True)
                     await choice.message.delete()
             else:
                 print("Unauthorized button use")
@@ -502,9 +584,55 @@ class Commands(commands.Cog):
         app_commands.Choice(name="Remove", value="Remove someone"),
         ])
     @app_commands.command(name="banlist", description="Banlist Options")
-    async def banlist(self, interaction:discord.Interaction, username:str, action:app_commands.Choice[str], server_id:int):
-        data = await Nitrado.banPlayer(id=server_id, username=username, ban=action)
-        await interaction.response.send_message(data)
+    async def banlist(self, interaction:discord.Interaction, username:str, action:app_commands.Choice[str]):
+        """Banlist management with server selection dropdown"""
+        s.execute("SELECT * FROM servers")
+        servers_list = s.fetchall()
+        
+        if not servers_list:
+            await interaction.response.send_message("No servers added to the database. Use `/nitradoserver` to add one.", ephemeral=True)
+            return
+        
+        async def banlist_callback(cb_interaction: discord.Interaction, server_id: int):
+            await cb_interaction.response.defer()
+            data = await Nitrado.banPlayer(id=server_id, username=username, ban=action)
+            # Convert bytes to string if necessary
+            if isinstance(data, bytes):
+                data = data.decode('utf-8')
+            # Ensure data is not empty
+            message = data if data else "Ban action completed."
+            await cb_interaction.followup.send(message)
+        
+        class BanListServerSelect(discord.ui.Select):
+            def __init__(self):
+                options = [
+                    discord.SelectOption(label=f"Server {server[0]}", value=str(server[0]))
+                    for server in servers_list
+                ]
+                super().__init__(
+                    placeholder="Choose a server...",
+                    min_values=1,
+                    max_values=1,
+                    options=options
+                )
+            
+            async def callback(self, sel_interaction: discord.Interaction):
+                if sel_interaction.user.id != interaction.user.id:
+                    await sel_interaction.response.send_message("You are not permitted to do this.", ephemeral=True)
+                    return
+                
+                await banlist_callback(sel_interaction, int(self.values[0]))
+        
+        class BanListServerView(discord.ui.View):
+            def __init__(self):
+                super().__init__()
+                self.add_item(BanListServerSelect())
+        
+        await interaction.response.send_message(
+            f"Select a server to manage banlist for **{username}** (Action: {action.name}):",
+            view=BanListServerView(),
+            ephemeral=True
+        )
 
     @app_commands.checks.has_permissions(administrator=True)
     @app_commands.choices(action=[
@@ -512,9 +640,55 @@ class Commands(commands.Cog):
         app_commands.Choice(name="Remove", value="Remove someone"),
         ])
     @app_commands.command(name="priority", description="Priority Options")
-    async def priority(self, interaction:discord.Interaction, username:str, action:app_commands.Choice[str], server_id:int):
-        data = await Nitrado.Priority(id=server_id, username=username, priority=action)
-        await interaction.response.send_message(data)
+    async def priority(self, interaction:discord.Interaction, username:str, action:app_commands.Choice[str]):
+        """Priority management with server selection dropdown"""
+        s.execute("SELECT * FROM servers")
+        servers_list = s.fetchall()
+        
+        if not servers_list:
+            await interaction.response.send_message("No servers added to the database. Use `/nitradoserver` to add one.", ephemeral=True)
+            return
+        
+        async def priority_callback(cb_interaction: discord.Interaction, server_id: int):
+            await cb_interaction.response.defer()
+            data = await Nitrado.Priority(id=server_id, username=username, priority=action)
+            # Convert bytes to string if necessary
+            if isinstance(data, bytes):
+                data = data.decode('utf-8')
+            # Ensure data is not empty
+            message = data if data else "Priority action completed."
+            await cb_interaction.followup.send(message)
+        
+        class PriorityServerSelect(discord.ui.Select):
+            def __init__(self):
+                options = [
+                    discord.SelectOption(label=f"Server {server[0]}", value=str(server[0]))
+                    for server in servers_list
+                ]
+                super().__init__(
+                    placeholder="Choose a server...",
+                    min_values=1,
+                    max_values=1,
+                    options=options
+                )
+            
+            async def callback(self, sel_interaction: discord.Interaction):
+                if sel_interaction.user.id != interaction.user.id:
+                    await sel_interaction.response.send_message("You are not permitted to do this.", ephemeral=True)
+                    return
+                
+                await priority_callback(sel_interaction, int(self.values[0]))
+        
+        class PriorityServerView(discord.ui.View):
+            def __init__(self):
+                super().__init__()
+                self.add_item(PriorityServerSelect())
+        
+        await interaction.response.send_message(
+            f"Select a server to manage priority for **{username}** (Action: {action.name}):",
+            view=PriorityServerView(),
+            ephemeral=True
+        )
 
     #@app_commands.checks.has_permissions(administrator=True)
     #@app_commands.choices(action=[
@@ -527,38 +701,119 @@ class Commands(commands.Cog):
 #    data = json.loads(data)
 
     @app_commands.checks.has_permissions(administrator=True)
-    @app_commands.choices(action=[
-        app_commands.Choice(name="Build", value="Build logs"),
-        app_commands.Choice(name="Death", value="Death Logs"),
-        app_commands.Choice(name="Kill", value="Kill logs"),
-        app_commands.Choice(name="Hit", value="Hit logs"),
-        app_commands.Choice(name="Heatmap", value="Heatmap Log"),
-        app_commands.Choice(name="BaseInteraction", value="Base Interaction Log"),
-        app_commands.Choice(name="OnlineCount", value="Online count data"),
-        app_commands.Choice(name="DeathCount", value="Total death count data"),
-        app_commands.Choice(name="KillCount", value="Total kill count data"),
-        app_commands.Choice(name="BanNotification", value="Ban Mitigation Channel")
-        ])
     @app_commands.command(name="logconfig", description="Change the output of logs")
-    async def logconfig(self, interaction:discord.Interaction, action:app_commands.Choice[str],nitradoserver:int, channel:Union[discord.TextChannel, discord.VoiceChannel]): # , imageurl:str=None, color:int=0x7318cf
+    async def logconfig(self, interaction:discord.Interaction):
+        """Interactive log configuration using dropdown menus"""
         s.execute("SELECT * FROM servers")
-        try:
-            r =  s.fetchall()
-        except Exception:
-                print("Initialization")
-                r = []
-        print(r)
-        if r != []:
-            if nitradoserver in [i[0] for i in r]:
-                logchannels = sqlite3.connect(f"db/{nitradoserver}.db")
+        servers_list = s.fetchall()
+        
+        if not servers_list:
+            await interaction.response.send_message("No servers added to the database. Use `/nitradoserver` to add one.", ephemeral=True)
+            return
+        
+        async def select_category_callback(ctx_interaction: discord.Interaction, server_id: int, category: str):
+            """Callback for when user selects a category"""
+            # Create a channel select view
+            async def select_channel_callback(final_interaction: discord.Interaction, channel: discord.TextChannel | discord.VoiceChannel):
+                """Callback for when user selects a channel"""
+                logchannels = sqlite3.connect(f"db/{server_id}.db")
                 lc = logchannels.cursor()
-                lc.execute("UPDATE config SET channelid = ? WHERE category = ?", (channel.id, action.name))
+                lc.execute("UPDATE config SET channelid = ? WHERE category = ?", (channel.id, category))
                 logchannels.commit()
-                await interaction.response.send_message(f"Updated {nitradoserver} to send {action.name} logs to {channel.mention}")
-            else:
-                await interaction.response.send_message(f"Nitrado Server ID {nitradoserver} Does not exist")
-        else:
-            await interaction.response.send_message("No servers added to the database use /nitradoserver")
+                logchannels.close()
+                await final_interaction.response.send_message(
+                    f"Updated server `{server_id}` to send `{category}` logs to {channel.mention}",
+                    ephemeral=True
+                )
+            
+            # Create custom view with channels
+            class ChannelView(discord.ui.View):
+                def __init__(self):
+                    super().__init__()
+                    self.select_channel = discord.ui.ChannelSelect(
+                        channel_types=[discord.ChannelType.text, discord.ChannelType.voice],
+                        min_values=1,
+                        max_values=1,
+                        placeholder="Select a channel...",
+                    )
+                    self.select_channel.callback = self.channel_callback
+                    self.add_item(self.select_channel)
+                
+                async def channel_callback(self, ch_interaction: discord.Interaction):
+                    if ch_interaction.user.id != interaction.user.id:
+                        await ch_interaction.response.send_message("You are not allowed to interact with this menu.", ephemeral=True)
+                        return
+                    await select_channel_callback(ch_interaction, self.select_channel.values[0])
+            
+            await ctx_interaction.response.send_message(
+                f"Select a channel for `{category}` logs:",
+                view=ChannelView(),
+                ephemeral=True
+            )
+        
+        # Create server select view
+        class ServerSelectForLogConfig(discord.ui.Select):
+            def __init__(self):
+                options = [
+                    discord.SelectOption(label=f"Server {server[0]}", value=str(server[0]))
+                    for server in servers_list
+                ]
+                super().__init__(
+                    placeholder="Choose a server...",
+                    min_values=1,
+                    max_values=1,
+                    options=options
+                )
+            
+            async def callback(self, sel_interaction: discord.Interaction):
+                if sel_interaction.user.id != interaction.user.id:
+                    await sel_interaction.response.send_message("You are not allowed to interact with this menu.", ephemeral=True)
+                    return
+                
+                server_id = int(self.values[0])
+                
+                # Create category select view
+                class CategorySelect(discord.ui.Select):
+                    def __init__(self):
+                        options = [
+                            discord.SelectOption(label=cat, value=cat)
+                            for cat in categories
+                        ]
+                        super().__init__(
+                            placeholder="Choose a log category...",
+                            min_values=1,
+                            max_values=1,
+                            options=options
+                        )
+                    
+                    async def callback(self, cat_interaction: discord.Interaction):
+                        if cat_interaction.user.id != interaction.user.id:
+                            await cat_interaction.response.send_message("You are not allowed to interact with this menu.", ephemeral=True)
+                            return
+                        
+                        await select_category_callback(cat_interaction, server_id, self.values[0])
+                
+                class CategorySelectView(discord.ui.View):
+                    def __init__(self):
+                        super().__init__()
+                        self.add_item(CategorySelect())
+                
+                await sel_interaction.response.send_message(
+                    f"Select a log category for server `{server_id}`:",
+                    view=CategorySelectView(),
+                    ephemeral=True
+                )
+        
+        class ServerSelectViewForLogConfig(discord.ui.View):
+            def __init__(self):
+                super().__init__()
+                self.add_item(ServerSelectForLogConfig())
+        
+        await interaction.response.send_message(
+            "Select a server to configure:",
+            view=ServerSelectViewForLogConfig(),
+            ephemeral=True
+        )
 
 
     @app_commands.checks.has_permissions(administrator=True)
@@ -567,41 +822,102 @@ class Commands(commands.Cog):
         app_commands.Choice(name="Remove", value="Remove a Nitrado server from the bot"),
         ])
     @app_commands.command(name="nitradoserver", description="Change nitrado servers associated with the bot")
-    async def nitrado(self, interaction:discord.Interaction, nitradoserver:int, action:app_commands.Choice[str]):
-        print(action)
+    async def nitrado(self, interaction:discord.Interaction, action:app_commands.Choice[str]):
         if action.name == "Add":
+            # For adding, use a modal for the server ID
+            class AddServerModal(discord.ui.Modal, title="Add Nitrado Server"):
+                server_id = discord.ui.TextInput(label="Nitrado Server ID", placeholder="Enter the numeric server ID")
+                
+                async def on_submit(self, modal_interaction: discord.Interaction):
+                    if modal_interaction.user.id != interaction.user.id:
+                        await modal_interaction.response.send_message("You are not allowed to submit this form.", ephemeral=True)
+                        return
+                    
+                    try:
+                        nitradoserver = int(self.server_id.value)
+                    except ValueError:
+                        await modal_interaction.response.send_message("Server ID must be a number.", ephemeral=True)
+                        return
+                    
+                    s.execute("SELECT * FROM servers")
+                    r = s.fetchall()
+                    
+                    try:
+                        if nitradoserver not in [i[0] for i in r]:
+                            logchannels = sqlite3.connect(f"db/{nitradoserver}.db")
+                            lc = logchannels.cursor()
+                            lc.execute("CREATE TABLE IF NOT EXISTS config (category, channelid)")
+                            for i in self.categories:
+                                lc.execute("INSERT INTO config (category, channelid) VALUES (?,NULL)", (i,))
+                            logchannels.commit()
+                            logchannels.close()
+                            s.execute("INSERT INTO servers (serverid) VALUES (?)", (nitradoserver,))
+                            servers.commit()
+                            await modal_interaction.response.send_message(f"Initialized server `{nitradoserver}`\nUse `/logconfig` to configure the server.", ephemeral=True)
+                        else:
+                            await modal_interaction.response.send_message("This nitrado server already exists in the database.", ephemeral=True)
+                    except Exception as e:
+                        logchannels = sqlite3.connect(f"db/{nitradoserver}.db")
+                        lc = logchannels.cursor()
+                        lc.execute("CREATE TABLE IF NOT EXISTS config (category, channelid)")
+                        for i in self.categories:
+                            lc.execute("INSERT INTO config (category, channelid) VALUES (?, 0)", (i,))
+                        logchannels.commit()
+                        logchannels.close()
+                        s.execute("INSERT INTO servers (serverid) VALUES (?)", (nitradoserver,))
+                        servers.commit()
+                        await modal_interaction.response.send_message(f"Initialized server `{nitradoserver}`\nUse `/logconfig` to configure the server.", ephemeral=True)
+            
+            await interaction.response.send_modal(AddServerModal())
+        
+        elif action.name == "Remove":
+            # For removing, use a dropdown
             s.execute("SELECT * FROM servers")
-            r = s.fetchall()
-            try:
-                if nitradoserver not in [i[0] for i in r]:
-                    logchannels = sqlite3.connect(f"db/{nitradoserver}.db")
-                    lc = logchannels.cursor()
-                    lc.execute("CREATE TABLE IF NOT EXISTS config (category, channelid)")
-                    for i in self.categories:
-                        lc.execute("INSERT INTO config (category, channelid) VALUES (?,NULL)", (i,))
-                    logchannels.commit()
-                    logchannels.close()
-                    s.execute("INSERT INTO servers (serverid) VALUES (?)", (nitradoserver,))
-                    servers.commit()
-                    await interaction.response.send_message(f"Initialized {nitradoserver} use /logconfig to config the server")
-                else:
-                    await interaction.response.send_message("This nitrado server already exists in the database.")
-            except IndexError:
-                logchannels = sqlite3.connect(f"db/{nitradoserver}.db")
-                lc = logchannels.cursor()
-                lc.execute("CREATE TABLE IF NOT EXISTS config (category, channelid)")
-                for i in self.categories:
-                    lc.execute("INSERT INTO config (category, channelid) VALUES (?, 0)", (i,))
-                logchannels.commit()
-                logchannels.close()
-                s.execute("INSERT INTO servers (serverid) VALUES (?)", (nitradoserver,))
-                servers.commit()
-                await interaction.response.send_message(f"Initialized {nitradoserver} use /logconfig to config the server")
-        if action.name == "Remove":
-            os.remove(f"db/{nitradoserver}.db")
-            s.execute(f"DELETE FROM servers WHERE serverid = ?", (nitradoserver,))
-            servers.commit()
-            #await interaction.response.send_message(f"Removed {nitradoserver} from the database")
+            servers_list = s.fetchall()
+            
+            if not servers_list:
+                await interaction.response.send_message("No servers in the database to remove.", ephemeral=True)
+                return
+            
+            class RemoveServerSelect(discord.ui.Select):
+                def __init__(self):
+                    options = [
+                        discord.SelectOption(label=f"Server {server[0]}", value=str(server[0]))
+                        for server in servers_list
+                    ]
+                    super().__init__(
+                        placeholder="Choose a server to remove...",
+                        min_values=1,
+                        max_values=1,
+                        options=options
+                    )
+                
+                async def callback(self, sel_interaction: discord.Interaction):
+                    if sel_interaction.user.id != interaction.user.id:
+                        await sel_interaction.response.send_message("You are not allowed to interact with this menu.", ephemeral=True)
+                        return
+                    
+                    server_id = int(self.values[0])
+                    
+                    try:
+                        os.remove(f"db/{server_id}.db")
+                        s.execute(f"DELETE FROM servers WHERE serverid = ?", (server_id,))
+                        servers.commit()
+                        await sel_interaction.response.send_message(f"Removed server `{server_id}` from the database.", ephemeral=True)
+                    except Exception as e:
+                        await sel_interaction.response.send_message(f"Error removing server: {str(e)}", ephemeral=True)
+            
+            class RemoveServerView(discord.ui.View):
+                def __init__(self):
+                    super().__init__()
+                    self.add_item(RemoveServerSelect())
+            
+            await interaction.response.send_message(
+                "Select a server to remove:",
+                view=RemoveServerView(),
+                ephemeral=True
+            )
+
 
 
 
@@ -648,21 +964,66 @@ class Commands(commands.Cog):
 
     @app_commands.checks.has_permissions(administrator=True)
     @app_commands.command(name="generateallheatmap", description="Generates a heatmap with all player movement positions for the log file")
-    async def maxkillfeed(self, interaction:discord.Interaction, serverid:int):
-        await interaction.response.defer()
-        fp = path.abspath(
-            path.join(path.dirname(__file__), "..", "files", f"{serverid}.ADM")
+    async def maxkillfeed(self, interaction:discord.Interaction):
+        """Generate heatmap with server selection dropdown"""
+        s.execute("SELECT * FROM servers")
+        servers_list = s.fetchall()
+        
+        if not servers_list:
+            await interaction.response.send_message("No servers added to the database. Use `/nitradoserver` to add one.", ephemeral=True)
+            return
+        
+        async def heatmap_callback(cb_interaction: discord.Interaction, serverid: int):
+            await cb_interaction.response.defer()
+            fp = path.abspath(
+                path.join(path.dirname(__file__), "..", "files", f"{serverid}.ADM")
+            )
+            playercoords = []
+            try:
+                async with aiofiles.open(fp, mode="r") as f:
+                    async for line in f:
+                        coordlog = re.search(r'Player ".*?" \(id=.*? pos=<(\d+\.\d+), (\d+\.\d+), (\d+\.\d+)>\)', line)
+                        if coordlog:
+                            x, y, _ = list(coordlog.groups())  # Extracting x and y coordinates only
+                            playercoords.append((float(x), float(y)))
+                generate_heatmap('./utils/y.jpg', playercoords)
+                embed = discord.Embed(title="Player Location Heatmap (All)",description=f'Entries: {len(playercoords)}', color=0xE40000).set_image(url="attachment://heatmap.jpg")
+                await cb_interaction.followup.send(embed=embed, file=discord.File("heatmap.jpg"))
+            except FileNotFoundError:
+                await cb_interaction.followup.send(f"Log file not found for server `{serverid}`.", ephemeral=True)
+            except Exception as e:
+                await cb_interaction.followup.send(f"Error generating heatmap: {str(e)}", ephemeral=True)
+        
+        class HeatmapServerSelect(discord.ui.Select):
+            def __init__(self):
+                options = [
+                    discord.SelectOption(label=f"Server {server[0]}", value=str(server[0]))
+                    for server in servers_list
+                ]
+                super().__init__(
+                    placeholder="Choose a server...",
+                    min_values=1,
+                    max_values=1,
+                    options=options
+                )
+            
+            async def callback(self, sel_interaction: discord.Interaction):
+                if sel_interaction.user.id != interaction.user.id:
+                    await sel_interaction.response.send_message("You are not permitted to do this.", ephemeral=True)
+                    return
+                
+                await heatmap_callback(sel_interaction, int(self.values[0]))
+        
+        class HeatmapServerView(discord.ui.View):
+            def __init__(self):
+                super().__init__()
+                self.add_item(HeatmapServerSelect())
+        
+        await interaction.response.send_message(
+            "Select a server to generate heatmap for:",
+            view=HeatmapServerView(),
+            ephemeral=True
         )
-        playercoords = []
-        async with aiofiles.open(fp, mode="r") as f:
-            async for line in f:
-                coordlog = re.search(r'Player ".*?" \(id=.*? pos=<(\d+\.\d+), (\d+\.\d+), (\d+\.\d+)>\)', line)
-                if coordlog:
-                    x, y, _ = list(coordlog.groups())  # Extracting x and y coordinates only
-                    playercoords.append((float(x), float(y)))
-        generate_heatmap('./utils/y.jpg', playercoords)
-        embed = discord.Embed(title="Player Location Heatmap (All)",description=f'Entries: {len(playercoords)}', color=0xE40000).set_image(url="attachment://heatmap.jpg")
-        await interaction.followup.send(embed=embed, file=discord.File("heatmap.jpg"))
 
     @app_commands.command(name="link", description="Links your account with DayZ Underworld bot")
     async def link_account(self, interaction:discord.Interaction, username:str):
@@ -712,7 +1073,7 @@ class Commands(commands.Cog):
             return embed
         if username != None:
             #COLLATE NOCASE
-            data_from_database = st.execute("""
+            data_result = st.execute("""
     SELECT p1.*,
            (SELECT COUNT(*) 
             FROM stats AS p2
@@ -724,13 +1085,13 @@ class Commands(commands.Cog):
            ) + 1 AS DeathRank
     FROM stats AS p1
     WHERE p1.user = ? COLLATE NOCASE;
-""", (username,)).fetchall()[0]
+""", (username,)).fetchall()
             #print(data_from_database[0][9])
             #print(data_from_database)
-            if len(data_from_database) == 0:
+            if len(data_result) == 0:
                 await interaction.response.send_message(f"{username} does not exist in the database. Please check spelling.")
             else:
-                await interaction.response.send_message(embed=await gather_data(data_from_database))
+                await interaction.response.send_message(embed=await gather_data(data_result[0]))
         elif username == None:
             data_from_database = st.execute("""
     SELECT p1.*,
@@ -751,7 +1112,7 @@ class Commands(commands.Cog):
             else:
                 await interaction.response.send_message(embed=await gather_data(data_from_database[0]))
         
-    @app_commands.command(name="unlink", description="Unlinks your account with DayZ Underworld bot")
+    @app_commands.command(name="unlink", description="Unlinks your account with the bot")
     async def unlink(self, interaction:discord.Interaction):
         username = st.execute(f"SELECT * FROM stats WHERE dcid = ?", (interaction.user.id,)).fetchall()
         if len(st.execute(f"SELECT * FROM stats WHERE dcid = ?", (interaction.user.id,)).fetchall()) >= 1:
@@ -823,7 +1184,6 @@ class Commands(commands.Cog):
         else:
             embed = discord.Embed(title="Error when finding Database",description=f"Path: {k} Not found, perhaps bot is not initialized. If deleting guild database execute command in the guild", color=0xE40000)
         await interaction.response.send_message(embed=embed)
-
 
 
 async def setup(bot):

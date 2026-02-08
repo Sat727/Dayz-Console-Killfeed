@@ -68,12 +68,21 @@ class Killfeed(commands.Cog):
         self.weapons = Weapons.weapons
         self.reported = {}
         self.last_log = {}
+        self.server_maps = {}  # Store map info per server
         self.headers = {"Authorization": f"Bearer {Config.NITRADO_TOKEN}"}
         logging.basicConfig(level=logging.INFO)
         self.FirstTime = True
         self.server_iterator = 0
-        self.testing = False
+        self.testing = True
         self.last_updated_server = None
+
+    async def safe_edit_channel(self, channel, **kwargs):
+        try:
+            await channel.edit(**kwargs)
+        except asyncio.TimeoutError:
+            logging.warning(f"Timeout editing channel {getattr(channel, 'id', None)}")
+        except Exception as e:
+            logging.exception(f"Error editing channel {getattr(channel, 'id', None)}: {e}")
 
     @commands.Cog.listener()
     async def on_ready(self):
@@ -129,10 +138,13 @@ class Killfeed(commands.Cog):
                     print(f"[{server_id}] Channel '{label}' is not configured. Skipping.")
 
             if not self.testing:
-                log_acquired = await self.fetch_server_log(server_id)
+                log_acquired = await fetch_server_log(self, server_id)
+            else:
+                log_acquired = True
 
             if log_acquired:
-                tasks_to_run.append(self.check_log(server_id, channel_map))
+                server_map = self.server_maps.get(server_id, "chernarus").lower()
+                tasks_to_run.append(self.check_server_log(server_id, channel_map, server_map))
 
         await asyncio.gather(*tasks_to_run)
 
@@ -140,14 +152,21 @@ class Killfeed(commands.Cog):
     async def fetch_logs(self):
         await self.process_active_servers()
 
-    async def check_server_log(self, server_id: int, db_config):
+    async def check_server_log(self, server_id: int, db_config, server_map: str = "chernarus"):
 
-        dayz = "https://dayz.ginfo.gg/livonia/#location=" # Automatic map detection needed. Will provide incorrect map location if map != livonia
+        # Map URL selection
+        map_urls = {
+            "chernarus": "https://dayz.ginfo.gg/chernarusplus/#location=",
+            "livonia": "https://dayz.ginfo.gg/livonia/#location=",
+            "namalsk": "https://dayz.ginfo.gg/namalsk/#location=",
+        }
+        dayz = map_urls.get(server_map, "https://dayz.ginfo.gg/chernarusplus/#location=")
+        can_use_locations = server_map == "chernarus"
         async def checkUserExists(player):
             st.execute(f"SELECT * FROM stats WHERE user = ?", (player,))
             r = st.fetchall()
             if r == [] or r == [()]:
-                st.execute(f"INSERT INTO stats (user, kills, deaths, alivetime, killstreak, deathstreak, dcid, money, bounty, device_id, last_location, vouchers) VALUES (?, 0, 0, ?, 0, 0, 0, 0, 0, 0, ?, ?)", (player, int(time.mktime(datetime.now().timetuple())), None, None))
+                st.execute(f"INSERT INTO stats (user, kills, deaths, alivetime, killstreak, deathstreak, dcid, money, bounty, device_id) VALUES (?, 0, 0, ?, 0, 0, 0, 0, 0, 0)", (player, int(time.mktime(datetime.now().timetuple()))))
                 #print(f"Initialized for {player}")
                 stats.commit()
 
@@ -227,7 +246,9 @@ class Killfeed(commands.Cog):
                     if online_match:
                         try:
                             player_total = int(online_match.group(1))
-                            await channel_map["online"].edit(name=f"Online: {player_total}")
+                            ch = channel_map.get("online")
+                            if ch:
+                                asyncio.create_task(self.safe_edit_channel(ch, name=f"Online: {player_total}"))
                             self.last_updated_server = server_id
                         except Exception:
                             pass
@@ -311,7 +332,9 @@ class Killfeed(commands.Cog):
                         victim_coords = re.sub(r',\s*', ';', coords[1])
                         victim_coords = re.sub(r'\.\d+', '', victim_coords)
 
-                        #location = getClosestLocation(victim_coords) # Removed until closest Loc revision
+                        location = ""
+                        if can_use_locations:
+                            location = getClosestLocation(victim_coords) # Only for Chernarus
 
                         weapon = re.search(r" with (.*) from", line) or re.search(r"with (.*)", line)
                         weapon = weapon.group(1) if weapon else "Unknown"
@@ -425,9 +448,9 @@ class Killfeed(commands.Cog):
                     #except Exception as e:
                     #    print(e)
                     #    continue
-                logging.info(f"[{server_id}] Log review complete. Updating site-wide stats...")
 
-    # Commit aggregate stats to activity database
+        # Commit aggregate stats to activity database
+        logging.info(f"[{server_id}] Log review complete. Activity - Kills: {counter_kills}, Deaths: {counter_deaths}")
         site_db = sqlite3.connect("db/activitydata.db")
         stats_cursor = site_db.cursor()
         stats_cursor.execute("UPDATE killcount SET activedata = activedata + ?", (counter_kills,))
@@ -451,19 +474,23 @@ class Killfeed(commands.Cog):
         update_series('deathdata', counter_deaths)
         update_series('data', counter_activity)
 
-        # Update Discord channel stats
-        try:
-            activity_conn = sqlite3.connect('db/activitydata.db')
-            cur = activity_conn.cursor()
-            if channel_map["deathcount"]:
-                total_deaths = cur.execute('SELECT activedata FROM deathcount').fetchone()[0]
-                await channel_map["deathcount"].edit(name=f"Total Deaths: {total_deaths}")
-            if channel_map["killcount"]:
-                total_kills = cur.execute('SELECT activedata FROM killcount').fetchone()[0]
-                await channel_map["killcount"].edit(name=f"Total Kills: {total_kills}")
-            activity_conn.close()
-        except Exception as e:
-            print(f"Error while publishing to Discord: {e}")
+        # Update Discord channel stats (only if there was new activity)
+        if counter_kills > 0 or counter_deaths > 0:
+            try:
+                activity_conn = sqlite3.connect('db/activitydata.db')
+                cur = activity_conn.cursor()
+                if channel_map["deathcount"]:
+                    total_deaths = cur.execute('SELECT activedata FROM deathcount').fetchone()[0]
+                    await channel_map["deathcount"].edit(name=f"Total Deaths: {total_deaths}")
+                if channel_map["killcount"]:
+                    total_kills = cur.execute('SELECT activedata FROM killcount').fetchone()[0]
+                    await channel_map["killcount"].edit(name=f"Total Kills: {total_kills}")
+                activity_conn.close()
+                logging.info(f"[{server_id}] Updated kill/death counters")
+            except asyncio.TimeoutError:
+                logging.warning(f"[{server_id}] Discord API timeout when updating channels")
+            except Exception as e:
+                logging.error(f"[{server_id}] Error updating Discord channels: {e}")
 
         # Finalize per-server processing state
         self.server_iterator += 1
@@ -471,16 +498,22 @@ class Killfeed(commands.Cog):
             self.FirstTime = False
             print("FirstTime flag reset after all servers processed.")
 
-        # Generate heatmap
+        # Generate heatmap (only for Chernarus and only if there's new location data)
         unique_locations = list({coord for coord in player_coords})
-        if channel_map["heatmap"]:
-            generate_heatmap('./utils/y.jpg', unique_locations)
-            heatmap_embed = discord.Embed(
-                title="Player Location Heatmap",
-                description=f"Entries: {len(unique_locations)}\n<t:{int(time.mktime(datetime.now().timetuple()))}:R>",
-                color=0xE40000
-            ).set_image(url="attachment://heatmap.jpg") # A better implementation is desired (Maybe stream data instead?)
-            await channel_map["heatmap"].send(embed=heatmap_embed, file=discord.File("heatmap.jpg")) # A better implementation is desired (Maybe stream data instead?)
+        if channel_map["heatmap"] and server_map == "chernarus" and len(unique_locations) > 0 and counter_activity > 0:
+            try:
+                generate_heatmap('./utils/y.jpg', unique_locations)
+                heatmap_embed = discord.Embed(
+                    title="Player Location Heatmap",
+                    description=f"Entries: {len(unique_locations)}\n<t:{int(time.mktime(datetime.now().timetuple()))}:R>",
+                    color=0xE40000
+                ).set_image(url="attachment://heatmap.jpg") # A better implementation is desired (Maybe stream data instead?)
+                await channel_map["heatmap"].send(embed=heatmap_embed, file=discord.File("heatmap.jpg")) # A better implementation is desired (Maybe stream data instead?)
+                logging.info(f"[{server_id}] Heatmap sent with {len(unique_locations)} location entries")
+            except asyncio.TimeoutError:
+                logging.warning(f"[{server_id}] Discord API timeout when sending heatmap")
+            except Exception as e:
+                logging.error(f"[{server_id}] Error generating heatmap: {e}")
 
 async def fetch_server_log(self, server_id):
     """
@@ -507,6 +540,17 @@ async def fetch_server_log(self, server_id):
             details = await server_info.json()
             username = details["data"]["gameserver"]["username"]
             game_type = details["data"]["gameserver"]["game"].lower()
+            # Extract map from config
+            server_name = details["data"]["gameserver"].get("name", "").lower()
+            # Determine map from config name or default to chernarus
+            if "livonia" in server_name:
+                current_map = "livonia"
+            elif "namalsk" in server_name:
+                current_map = "namalsk"
+            else:
+                current_map = "chernarus"
+            self.server_maps[server_id] = current_map
+            logging.info(f"[{server_id}] Detected map: {current_map}")
 
             if game_type == "dayzps":
                 relative_path = "dayzps/config/DayZServer_PS4_x64.ADM"
@@ -515,12 +559,32 @@ async def fetch_server_log(self, server_id):
             else:
                 logging.error(f"[{server_id}] Unsupported game type: {game_type}")
                 return False
+            
+            # List directory to find the most recent .ADM file
+            config_dir = f"/games/{username}/noftp/{'/'.join(relative_path.split('/')[:-1])}"
+            list_endpoint = f"https://api.nitrado.net/services/{server_id}/gameservers/file_server/list?dir={config_dir}"
+            list_response = await session.get(list_endpoint, headers=self.headers)
 
-            download_endpoint = f"https://api.nitrado.net/services/{server_id}/gameservers/file_server/download?file=/games/{username}/noftp/{relative_path}"
+            if list_response.status != 200:
+                logging.error(f"[{server_id}] Failed to list directory ({list_response.status})")
+                return False
+
+            list_data = await list_response.json()
+            adm_files = [entry for entry in list_data["data"]["entries"] 
+                        if entry["type"] == "file" and entry["name"].endswith(".ADM")]
+
+            if not adm_files:
+                logging.error(f"[{server_id}] No .ADM files found in {config_dir}")
+                return False
+
+            most_recent_file = max(adm_files, key=lambda x: x["modified_at"])
+            file_path = most_recent_file["path"]
+
+            download_endpoint = f"https://api.nitrado.net/services/{server_id}/gameservers/file_server/download?file={file_path}"
             token_response = await session.get(download_endpoint, headers=self.headers)
 
             if token_response.status != 200:
-                logging.error(f"[{server_id}] Failed to retrieve download token ({token_response.status})")
+                logging.error(f"[{server_id}] Failed to retrieve download token ({token_response.status}) ({token_response.content})")
                 return False
 
             token_data = await token_response.json()
@@ -540,6 +604,9 @@ async def fetch_server_log(self, server_id):
 
         except Exception as e:
             logging.exception(f"[{server_id}] Exception during log fetch: {e}")
+            # Set default map on error
+            if server_id not in self.server_maps:
+                self.server_maps[server_id] = "chernarus"
             return False
 
 

@@ -99,7 +99,7 @@ class NitradoFunctions():
         priorityData = json.loads(data)['data']['gameserver']['settings']['general']['priority']
         currentPriority = priorityData.split('\r\n')
 
-        if priority == 'Add':
+        if priority.name == 'Add':
             print(currentPriority)
             if str(username) in currentPriority:
                 return "User already priority"
