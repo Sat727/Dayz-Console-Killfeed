@@ -58,9 +58,9 @@ Classic prefix command available for sync:
 
 ---
 
-## 🐍 Installing Python 3.10 (Windows)
+## 🐍 Installing Python
 
-Before running the bot, you’ll need **Python 3.10** (not 3.11+).
+Before running the bot, you’ll need 3.10+
 
 ### 1. Download Python 3.10
 - Visit the official page: [https://www.python.org/downloads/release/python-3100/](https://www.python.org/downloads/release/python-3100/)
