@@ -98,8 +98,8 @@ Once Python and pip are installed, continue to the **Setup Guide** below.
 
 1. Clone the repository:
    ```bash
-   git clone https://github.com/yourusername/dayz-bot.git
-   cd dayz-bot
+   git clone https://github.com/Sat727/Dayz-Console-Killfeed
+   cd Dayz-Console-Killfeed
    ```
 
 2. Edit `config.py` with your Nitrado token, Discord bot token, and channel mappings.
