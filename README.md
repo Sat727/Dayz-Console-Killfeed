@@ -148,9 +148,9 @@ Once a device is banned:
 
 ---
 
-## Python 3.10 Installation (Windows)
+## Python Installation (Windows)
 
-Before running the bot, you will need Python 3.10 (not 3.11 or later).
+Before running the bot, you will need Python 3.10 or later.
 
 ### 1. Download Python 3.10
 - Visit: https://www.python.org/downloads/release/python-3100/
@@ -197,7 +197,7 @@ python -m pip install --upgrade pip
 
 4. Run the bot:
    ```bash
-   python bot.py
+   python main.py
    ```
 
 ---
