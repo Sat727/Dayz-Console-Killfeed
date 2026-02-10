@@ -1029,30 +1029,45 @@ class Commands(commands.Cog):
     @app_commands.command(name="stats", description="View your own stats, or someone elses")
     async def stats(self, interaction:discord.Interaction, username:Union[str, None]=None):
         async def gather_data(data_from_database):
-            temp_keys = ['user', 'kills', 'deaths', 'alive since', 'death streak', 'kill streak', 'discord ID', 'money', 'bounty']
-            temp_keys = [i.title() for i in temp_keys]
-            result_dict = dict.fromkeys(temp_keys)
-            remove_from_dict = []
-            #print("Generating stats")
-            for key, value in zip(result_dict.keys(), data_from_database):
-                #print(key)
-                if key == 'Alive Since':
-                    value = f'<t:{value}>'
-                if key == 'Kills':
-                    value = str(value) + f' (Ranked #{str(data_from_database[-2])})'
-                if key == 'Deaths':
-                    value = str(value) + f' (Ranked #{str(data_from_database[-1])})'
-                if key == 'Discord Id':
-                    if value == 0 or value == None:
-                        remove_from_dict.append(key)
-                if value != None:
-                    result_dict[key] = value
-            for i in remove_from_dict:
-                del result_dict[i]
-            embed = discord.Embed(title=f'{data_from_database[0]}\'s Stats', description=f'Stats as of <t:{int(datetime.datetime.now().timestamp())}>', color=0xE40000)
-            for i in result_dict:
-                value = result_dict.get(i)
-                embed.add_field(name=i, value=value)
+            # data_from_database structure: (id, user, kills, deaths, alivetime, deathstreak, killstreak, dcid, money, bounty, device_id, created_at, KillRank, DeathRank)
+            result_dict = {}
+            
+            # Extract values from database tuple
+            db_id = data_from_database[0]
+            username = data_from_database[1]
+            kills = data_from_database[2]
+            deaths = data_from_database[3]
+            alivetime = data_from_database[4]
+            deathstreak = data_from_database[5]
+            killstreak = data_from_database[6]
+            dcid = data_from_database[7]
+            money = data_from_database[8]
+            bounty = data_from_database[9]
+            created_at = data_from_database[11]
+            kill_rank = data_from_database[12]
+            death_rank = data_from_database[13]
+            
+            # Parse created_at datetime string to Unix timestamp
+            created_at_dt = datetime.datetime.strptime(created_at, '%Y-%m-%d %H:%M:%S')
+            created_at_timestamp = int(created_at_dt.timestamp())
+            
+            # Build result dictionary with proper values
+            result_dict['User'] = username
+            result_dict['Kills'] = f'{kills} (Ranked #{kill_rank})'
+            result_dict['Deaths'] = f'{deaths} (Ranked #{death_rank})'
+            result_dict['Alive Since'] = f'<t:{created_at_timestamp}>'
+            result_dict['Death Streak'] = str(deathstreak)
+            result_dict['Kill Streak'] = str(killstreak)
+            result_dict['Money'] = str(money)
+            result_dict['Bounty'] = str(bounty)
+            
+            # Only include Discord ID if it's set
+            if dcid and dcid != 0:
+                result_dict['Discord ID'] = str(dcid)
+            
+            embed = discord.Embed(title=f'{username}\'s Stats', description=f'Stats as of <t:{int(datetime.datetime.now().timestamp())}>', color=0xE40000)
+            for key, value in result_dict.items():
+                embed.add_field(name=key, value=value)
             return embed
         if username != None:
             conn = killfeed_database.get_connection()
