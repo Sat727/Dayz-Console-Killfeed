@@ -3,65 +3,21 @@ from config import Config
 from os import path
 from datetime import datetime
 from utils.Weapons import Weapons as Weapons
-from utils.closestLoc import getClosestLocation # Kept for now
-import sys, os, time, math, sqlite3, re, discord, logging, asyncio, aiofiles, aiohttp, pytz
+from utils.closestLoc import getClosestLocation
 from utils.heatmap import generate_heatmap
-region = sqlite3.connect("db/region.db")
-rg = region.cursor()
+from utils import killfeed_helpers, killfeed_database, killfeed_events, killfeed_nitrado
+import sys, os, time, sqlite3, re, discord, logging, asyncio, aiofiles
+import aiohttp
 
-deviceban = sqlite3.connect("db/deviceidban.db")
-dbans = deviceban.cursor()
+# Initialize logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-activitydata = sqlite3.connect("db/activitydata.db")
-actdata = activitydata.cursor()
-
-tables = [
-    "CREATE TABLE IF NOT EXISTS data (activedata)",
-    "CREATE TABLE IF NOT EXISTS onlinecount (activedata)",
-    "CREATE TABLE IF NOT EXISTS killcount (activedata int)",
-    "CREATE TABLE IF NOT EXISTS deathcount (activedata int)",
-    "CREATE TABLE IF NOT EXISTS deathdata (activedata)",
-    "CREATE TABLE IF NOT EXISTS killdata (activedata)"
-]
-for stmt in tables:
-    actdata.execute(stmt)
-
-r = actdata.execute("SELECT * FROM data").fetchall()
-ro = actdata.execute("SELECT * FROM onlinecount").fetchall()
-kills = actdata.execute("SELECT * FROM killcount").fetchall()
-deaths = actdata.execute("SELECT * FROM deathcount").fetchall()
-deathdata = actdata.execute("SELECT * FROM deathdata").fetchall()
-killdata = actdata.execute("SELECT * FROM killdata").fetchall()
-
-if not deathdata:
-    print("Inserting into db")
-    actdata.execute("INSERT INTO deathdata (activedata) VALUES ('0;0;0;0;0;0')")
-
-if not killdata:
-    print("Inserting into db")
-    actdata.execute("INSERT INTO killdata (activedata) VALUES ('0;0;0;0;0;0')")
-
-if not deaths:
-    actdata.execute("INSERT INTO deathcount (activedata) VALUES (0)")
-
-if not kills:
-    actdata.execute("INSERT INTO killcount (activedata) VALUES (0)")
-
-if not r:
-    print("Inserting into db")
-    actdata.execute("INSERT INTO data (activedata) VALUES ('0;0;0;0;0;0;0;0;0;0;0;0')")
-
-if not ro:
-    actdata.execute("INSERT INTO onlinecount (activedata) VALUES ('0;0;0;0;0;0')")
-#actdata.execute("UPDATE data SET activedata = ?", ('0;0;0;0;0;0;0;0;0;0;0;0',)) # DEPRECIATED - Website required
-#actdata.execute("UPDATE onlinecount SET activedata = ?", ('0;0;0;0;0;0',)) # DEPRECIATED - Website required
-
-activitydata.commit()
-activitydata.close()
-
-stats = sqlite3.connect("db/stats.db")
-st = stats.cursor()
-bodypart = ''
+# Initialize database connections
+killfeed_database.initialize_master_db()
+conn, st = killfeed_database.initialize_stats_db()
+killfeed_database.initialize_activity_db()
+stats = conn
 class Killfeed(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -70,31 +26,28 @@ class Killfeed(commands.Cog):
         self.last_log = {}
         self.server_maps = {}  # Store map info per server
         self.headers = {"Authorization": f"Bearer {Config.NITRADO_TOKEN}"}
-        logging.basicConfig(level=logging.INFO)
         self.FirstTime = True
         self.server_iterator = 0
-        self.testing = True
+        self.testing = False
         self.last_updated_server = None
+        self.task_started = False  # Flag to prevent duplicate task starts
 
     async def safe_edit_channel(self, channel, **kwargs):
         try:
-            await channel.edit(**kwargs)
+            #await channel.edit(**kwargs)
+            pass
         except asyncio.TimeoutError:
-            logging.warning(f"Timeout editing channel {getattr(channel, 'id', None)}")
+            logger.warning(f"Timeout editing channel {getattr(channel, 'id', None)}")
         except Exception as e:
-            logging.exception(f"Error editing channel {getattr(channel, 'id', None)}: {e}")
+            logger.exception(f"Error editing channel {getattr(channel, 'id', None)}: {e}")
 
     @commands.Cog.listener()
     async def on_ready(self):
-        logging.info("Started bot")
-        self.fetch_logs.start()
-
-    @staticmethod
-    async def new_logfile(fp) -> bool:
-        async with aiofiles.open(fp, "r") as f:
-            text = await f.read()
-            logs = len(re.findall("AdminLog", text))
-        return logs == 1
+        logger.info("Started bot")
+        # Only start the task once to prevent duplicate runs
+        if not self.task_started and not self.fetch_logs.is_running():
+            self.fetch_logs.start()
+            self.task_started = True
 
     async def process_active_servers(self):
         """
@@ -104,9 +57,8 @@ class Killfeed(commands.Cog):
             log_acquired = True
         tasks_to_run = []
 
-        server_db = sqlite3.connect("db/servers.db")
-        cursor = server_db.cursor()
-        registered_servers = cursor.execute("SELECT * FROM servers").fetchall()
+        # Use consolidated database
+        registered_servers = killfeed_database.get_servers()
 
         if not registered_servers:
             print("No configured servers found. Initialize via setup commands.")
@@ -116,29 +68,17 @@ class Killfeed(commands.Cog):
 
         for entry in registered_servers:
             server_id = entry[0]
-            print(f"[{server_id}] Processing server entry")
+            logger.debug(f"[{server_id}] Processing server entry")
 
-            server_db_path = f"db/{server_id}.db"
-            if not os.path.exists(server_db_path):
-                print(f"Missing DB for server {server_id}. Initialize it before use.")
-                continue
-
-            server_config = sqlite3.connect(server_db_path)
-            config_cursor = server_config.cursor()
+            # Get config from consolidated database for this specific server
             try:
-                channel_map = config_cursor.execute("SELECT * FROM config").fetchall()
-            except sqlite3.OperationalError as e:
-                print(f"Server DB ({server_id}) misconfigured:\n{e}")
+                channel_map = killfeed_database.get_all_config_dict(str(server_id))
+            except Exception as e:
+                logger.error(f"Server config ({server_id}) misconfigured:\n{e}")
                 continue
-            finally:
-                server_config.close()
-
-            for label, target in channel_map:
-                if target is None:
-                    print(f"[{server_id}] Channel '{label}' is not configured. Skipping.")
 
             if not self.testing:
-                log_acquired = await fetch_server_log(self, server_id)
+                log_acquired = await killfeed_nitrado.fetch_server_log(server_id, self.server_maps)
             else:
                 log_acquired = True
 
@@ -150,56 +90,45 @@ class Killfeed(commands.Cog):
 
     @tasks.loop(minutes=5)
     async def fetch_logs(self):
-        await self.process_active_servers()
+        try:
+            await self.process_active_servers()
+        except Exception as e:
+            logger.error(f"Error in fetch_logs task: {e}", exc_info=True)
+
+    @fetch_logs.before_loop
+    async def before_fetch_logs(self):
+        """Wait for bot to be ready before starting the task loop."""
+        await self.bot.wait_until_ready()
+        logger.info("Fetch logs task started - running every 5 minutes")
 
     async def check_server_log(self, server_id: int, db_config, server_map: str = "chernarus"):
 
-        # Map URL selection
-        map_urls = {
-            "chernarus": "https://dayz.ginfo.gg/chernarusplus/#location=",
-            "livonia": "https://dayz.ginfo.gg/livonia/#location=",
-            "namalsk": "https://dayz.ginfo.gg/namalsk/#location=",
-        }
-        dayz = map_urls.get(server_map, "https://dayz.ginfo.gg/chernarusplus/#location=")
-        can_use_locations = server_map == "chernarus"
-        async def checkUserExists(player):
-            st.execute(f"SELECT * FROM stats WHERE user = ?", (player,))
-            r = st.fetchall()
-            if r == [] or r == [()]:
-                st.execute(f"INSERT INTO stats (user, kills, deaths, alivetime, killstreak, deathstreak, dcid, money, bounty, device_id) VALUES (?, 0, 0, ?, 0, 0, 0, 0, 0, 0)", (player, int(time.mktime(datetime.now().timetuple()))))
-                st.execute(f"INSERT INTO stats (user, kills, deaths, alivetime, killstreak, deathstreak, dcid, money, bounty, device_id) VALUES (?, 0, 0, ?, 0, 0, 0, 0, 0, 0)", (player, int(time.mktime(datetime.now().timetuple()))))
-                #print(f"Initialized for {player}")
-                stats.commit()
-
-        async def timeFunc(timestamp): # Revision needed
-            parts = timestamp.split(':')
-            if len(parts[2]) == 1:
-                timestamp = f"{parts[0]}:{parts[1]}:{parts[2].zfill(2)}"
-            utc_now = datetime.now(pytz.utc)
-            est_timezone = pytz.timezone('US/Eastern')
-            est_time = datetime.strptime(f"{utc_now.strftime('%Y-%m-%d')} {timestamp}", '%Y-%m-%d %H:%M:%S')
-            est_time = est_timezone.localize(est_time)
-            utc_time = est_time.astimezone(pytz.utc)
-            est_time = utc_time.astimezone(est_timezone)
-            return f'<t:{int(est_time.timestamp())}>'
-
-        def calculate_distance(x1, z1, x2, z2):
-            return math.sqrt((x1 - x2) ** 2 + (z1 - z2) ** 2)
+        # Get map URL and location capability
+        dayz = killfeed_nitrado.get_map_url(server_map)
+        can_use_locations = killfeed_nitrado.can_use_locations(server_map)
 
         log_file_path = path.abspath(path.join(path.dirname(__file__), "..", "files", f"{server_id}.ADM"))
-        logging.info(f"[{server_id}] Analyzing log file: {log_file_path}")
+        logger.info(f"[{server_id}] Analyzing log file: {log_file_path}")
 
+        # Check if log file exists before processing
+        if not os.path.exists(log_file_path):
+            logger.warning(f"[{server_id}] Log file not found at {log_file_path}. Skipping this server.")
+            return
+
+        # Build channel map from config dictionary - safely handle None values
         channel_map = {
-            "build": self.bot.get_channel(db_config[0][1]),
-            "death": self.bot.get_channel(db_config[1][1]),
-            "kill": self.bot.get_channel(db_config[2][1]),
-            "hit": self.bot.get_channel(db_config[3][1]),
-            "heatmap": self.bot.get_channel(db_config[4][1]),
-            "flag": self.bot.get_channel(db_config[5][1]),
-            "online": self.bot.get_channel(db_config[6][1]),
-            "deathcount": self.bot.get_channel(db_config[7][1]),
-            "killcount": self.bot.get_channel(db_config[8][1]),
-            "ban_notify": self.bot.get_channel(db_config[9][1]),
+            "build": self.bot.get_channel(db_config.get("Build")) if db_config.get("Build") else None,
+            "death": self.bot.get_channel(db_config.get("Death")) if db_config.get("Death") else None,
+            "kill": self.bot.get_channel(db_config.get("Kill")) if db_config.get("Kill") else None,
+            "hit": self.bot.get_channel(db_config.get("Hit")) if db_config.get("Hit") else None,
+            "heatmap": self.bot.get_channel(db_config.get("Heatmap")) if db_config.get("Heatmap") else None,
+            "flag": self.bot.get_channel(db_config.get("BaseInteraction")) if db_config.get("BaseInteraction") else None,
+            "online": self.bot.get_channel(db_config.get("OnlineCount")) if db_config.get("OnlineCount") else None,
+            "deathcount": self.bot.get_channel(db_config.get("DeathCount")) if db_config.get("DeathCount") else None,
+            "killcount": self.bot.get_channel(db_config.get("KillCount")) if db_config.get("KillCount") else None,
+            "ban_notify": self.bot.get_channel(db_config.get("BanNotification")) if db_config.get("BanNotification") else None,
+            "connect": self.bot.get_channel(db_config.get("Connect")) if db_config.get("Connect") else None,
+            "disconnect": self.bot.get_channel(db_config.get("Disconnect")) if db_config.get("Disconnect") else None,
         }
 
         if server_id not in self.reported:
@@ -217,18 +146,22 @@ class Killfeed(commands.Cog):
         counter_deaths = 0
         counter_activity = 0
         reading_players = False
+        online_count_updated = False
 
         async with aiofiles.open(log_file_path, "r") as file:
             async for raw_line in file:
                 line = raw_line.strip()
 
+                # Check if player exists in database
                 match_player = re.search(r'Player "([^"]+)"', line)
                 if match_player:
-                    await checkUserExists(match_player.group(1))
+                    killfeed_database.check_user_exists(st, match_player.group(1), stats)
 
+                # Skip already reported lines
                 if line in line_tracker:
                     continue
 
+                # Handle player list parsing
                 if "##### PlayerList log:" in line:
                     reading_players = True
                     player_coords.clear()
@@ -242,20 +175,23 @@ class Killfeed(commands.Cog):
                         player_coords.append((x, z))
                         counter_online += 1
 
-                if channel_map["online"]:
+                # Update online player count if channel exists (only once per check to avoid rate limits)
+                if channel_map["online"] and not online_count_updated:
                     online_match = re.search(r"(\d+)(?=\s*players)", line)
                     if online_match:
                         try:
                             player_total = int(online_match.group(1))
                             ch = channel_map.get("online")
                             if ch:
-                                asyncio.create_task(self.safe_edit_channel(ch, name=f"Online: {player_total}"))
+                                await self.safe_edit_channel(ch, name=f"Online: {player_total}")
                             self.last_updated_server = server_id
-                        except Exception:
-                            pass
+                            online_count_updated = True
+                        except Exception as e:
+                            logger.error(f"Error updating online count: {e}")
 
+                # Check for new log file
                 if "AdminLog" in line and previous_log_marker != line:
-                    if await self.new_logfile(log_file_path):
+                    if await killfeed_helpers.new_logfile(log_file_path):
                         self.last_log[server_id] = line
                         self.reported[server_id] = []
                         line_tracker = self.reported[server_id]
@@ -263,235 +199,285 @@ class Killfeed(commands.Cog):
                 line_tracker.append(line)
                 counter_activity += 1
 
-                body_match = re.search(r'into ([^(]+)', line)
-                current_bodypart = body_match.group(1) if body_match else ""
+                # Extract body part hit
+                current_bodypart = killfeed_helpers.extract_bodypart(line)
 
-                if "(DEAD)" in line or "committed suicide" in line:
-                    timestamp = str(re.search(r"(\d+:\d+:\d+)", line).group(1))
-                    timestamp = await timeFunc(timestamp)
-                    player_killed = str(re.search(r'Player\s+"?(.*?)"?\s+\(.*?\)', line).group(1)).strip(' "\'')
+                # Handle different event types
+                try:
+                    # Check connection/disconnection events first (no "(DEAD)" check)
+                    if killfeed_events.is_player_connected_event(line):
+                        timestamp = killfeed_helpers.extract_timestamp(line)
+                        timestamp_str = await killfeed_helpers.time_func(timestamp)
+                        player = killfeed_helpers.extract_player_name(line)
+                        if player:
+                            # Initialize player stats on connect
+                            killfeed_database.check_user_exists(st, player, stats)
+                            embed = await killfeed_events.create_player_connected_embed(player, timestamp_str)
+                            if channel_map.get("connect"):
+                                await channel_map["connect"].send(embed=embed)
 
-                    if "committed suicide" in line:
+                    elif killfeed_events.is_player_disconnected_event(line):
+                        timestamp = killfeed_helpers.extract_timestamp(line)
+                        timestamp_str = await killfeed_helpers.time_func(timestamp)
+                        player = killfeed_helpers.extract_player_name(line)
+                        if player:
+                            embed = await killfeed_events.create_player_disconnected_embed(player, timestamp_str)
+                            if channel_map.get("disconnect"):
+                                await channel_map["disconnect"].send(embed=embed)
+
+                    # Check specific death types BEFORE generic "(DEAD)" check
+                    elif killfeed_events.is_suicide_event(line):
                         counter_deaths += 1
-                        embed = discord.Embed(
-                            title=f"Suicide | {timestamp}",
-                            description=f"**{player_killed}** committed suicide",
-                            color=0xE40000,
-                        )
-                        await channel_map["death"].send(embed=embed)
+                        timestamp = killfeed_helpers.extract_timestamp(line)
+                        timestamp_str = await killfeed_helpers.time_func(timestamp)
+                        player_killed = killfeed_helpers.extract_player_name(line)
+                        
+                        # Update death stats
+                        if player_killed:
+                            conn_death = killfeed_database.get_connection()
+                            cursor_death = conn_death.cursor()
+                            killfeed_database.check_user_exists(cursor_death, player_killed, conn_death)
+                            killfeed_database.update_death_stats(cursor_death, player_killed, conn_death)
+                            conn_death.close()
+                            logger.info(f"Suicide death recorded: {player_killed}")
+                        
+                        embed = await killfeed_events.create_suicide_embed(player_killed, timestamp_str)
+                        if channel_map["death"]:
+                            await channel_map["death"].send(embed=embed)
 
-                    elif "hit by explosion" in line:
+                    elif killfeed_events.is_explosion_event(line):
                         counter_deaths += 1
                         counter_kills += 1
-                        explosion_type = re.search(r"\[HP: 0\] hit by explosion \((.*)\)", line).group(1)
-                        embed = discord.Embed(
-                            title=f"Exploded | {timestamp}",
-                            description=f"**{player_killed}** died from explosion ({explosion_type})",
-                            color=0xE40000,
-                        )
-                        await channel_map["kill"].send(embed=embed)
+                        timestamp = killfeed_helpers.extract_timestamp(line)
+                        timestamp_str = await killfeed_helpers.time_func(timestamp)
+                        player_killed = killfeed_helpers.extract_player_name(line)
+                        
+                        # Update death stats
+                        if player_killed:
+                            conn_death = killfeed_database.get_connection()
+                            cursor_death = conn_death.cursor()
+                            killfeed_database.check_user_exists(cursor_death, player_killed, conn_death)
+                            killfeed_database.update_death_stats(cursor_death, player_killed, conn_death)
+                            conn_death.close()
+                            logger.info(f"Explosion death recorded: {player_killed}")
+                        
+                        explosion_type = killfeed_events.extract_explosion_type(line)
+                        embed = await killfeed_events.create_explosion_embed(player_killed, explosion_type, timestamp_str)
+                        if channel_map["kill"]:
+                            await channel_map["kill"].send(embed=embed)
 
-                elif "killed by Player" in line:
-                    counter_deaths += 1
-                    counter_kills += 1
-                    print("PvP event detected")
+                    elif killfeed_events.is_bleed_out_event(line):
+                        counter_deaths += 1
+                        timestamp = killfeed_helpers.extract_timestamp(line)
+                        timestamp_str = await killfeed_helpers.time_func(timestamp)
+                        victim = killfeed_helpers.extract_player_name(line)
+                        
+                        # Update death stats
+                        if victim:
+                            conn_death = killfeed_database.get_connection()
+                            cursor_death = conn_death.cursor()
+                            killfeed_database.check_user_exists(cursor_death, victim, conn_death)
+                            killfeed_database.update_death_stats(cursor_death, victim, conn_death)
+                            conn_death.close()
+                            logger.info(f"Bleed out death recorded: {victim}")
+                        
+                        embed = await killfeed_events.create_bleed_out_embed(victim, timestamp_str)
+                        if channel_map["death"]:
+                            await channel_map["death"].send(embed=embed)
 
-                    try:
-                        player_killer = re.search(r'killed by Player "(.*?)"', line).group(1)
-                        player_killed = re.search(r'[\'"](.*?)[\'"]', line).group(1)
-                        timestamp = str(re.search(r"(\d+:\d+:\d+)", line).group(1))
-                        timestamp = await timeFunc(timestamp)
+                    elif killfeed_events.is_wolf_kill_event(line):
+                        counter_deaths += 1
+                        timestamp = killfeed_helpers.extract_timestamp(line)
+                        timestamp_str = await killfeed_helpers.time_func(timestamp)
+                        victim = killfeed_helpers.extract_player_name(line)
+                        
+                        # Update death stats
+                        if victim:
+                            conn_death = killfeed_database.get_connection()
+                            cursor_death = conn_death.cursor()
+                            killfeed_database.check_user_exists(cursor_death, victim, conn_death)
+                            killfeed_database.update_death_stats(cursor_death, victim, conn_death)
+                            conn_death.close()
+                            logger.info(f"Wolf kill death recorded: {victim}")
+                        
+                        embed = await killfeed_events.create_wolf_kill_embed(victim, timestamp_str)
+                        if channel_map["death"]:
+                            await channel_map["death"].send(embed=embed)
 
-                        st.execute("UPDATE stats SET kills = kills + 1, killstreak = killstreak + 1, deathstreak = 0 WHERE user = ?", (player_killer,))
-                        st.execute("UPDATE stats SET deaths = deaths + 1, killstreak = 0, deathstreak = deathstreak + 1, alivetime = ? WHERE user = ?",
-                                   (int(time.mktime(datetime.now().timetuple())), player_killed))
-                        stats.commit()
+                    elif killfeed_events.is_bear_kill_event(line):
+                        counter_deaths += 1
+                        timestamp = killfeed_helpers.extract_timestamp(line)
+                        timestamp_str = await killfeed_helpers.time_func(timestamp)
+                        victim = killfeed_helpers.extract_player_name(line)
+                        
+                        # Update death stats
+                        if victim:
+                            conn_death = killfeed_database.get_connection()
+                            cursor_death = conn_death.cursor()
+                            killfeed_database.check_user_exists(cursor_death, victim, conn_death)
+                            killfeed_database.update_death_stats(cursor_death, victim, conn_death)
+                            conn_death.close()
+                            logger.info(f"Bear kill death recorded: {victim}")
+                        
+                        embed = await killfeed_events.create_bear_kill_embed(victim, timestamp_str)
+                        if channel_map["death"]:
+                            await channel_map["death"].send(embed=embed)
 
-                        timealive_ts = st.execute("SELECT alivetime FROM stats WHERE user = ?", (player_killed,)).fetchone()[0]
-                        timealive = datetime.now() - datetime.fromtimestamp(timealive_ts)
-                        days = timealive.days
-                        hours, remainder = divmod(timealive.seconds, 3600)
-                        minutes, seconds = divmod(remainder, 60)
-                        seconds += timealive.microseconds / 1e6
-                        timealivestr = ''
-                        if days > 0: timealivestr += f'{days} Day{"s" if days > 1 else ""}, '
-                        if hours > 0: timealivestr += f'{hours} Hour{"s" if hours > 1 else ""}, '
-                        if minutes > 0: timealivestr += f'{minutes} Minute{"s" if minutes > 1 else ""}, '
-                        if int(seconds) > 0: timealivestr += f'{int(seconds)} Second{"s" if int(seconds) > 1 else ""}'
+                    elif killfeed_events.is_fall_death_event(line):
+                        counter_deaths += 1
+                        timestamp = killfeed_helpers.extract_timestamp(line)
+                        timestamp_str = await killfeed_helpers.time_func(timestamp)
+                        victim = killfeed_helpers.extract_player_name(line)
+                        
+                        # Update death stats
+                        if victim:
+                            conn_death = killfeed_database.get_connection()
+                            cursor_death = conn_death.cursor()
+                            killfeed_database.check_user_exists(cursor_death, victim, conn_death)
+                            killfeed_database.update_death_stats(cursor_death, victim, conn_death)
+                            conn_death.close()
+                            logger.info(f"Fall death recorded: {victim}")
+                        
+                        embed = await killfeed_events.create_fall_death_embed(victim, timestamp_str)
+                        if channel_map["death"]:
+                            await channel_map["death"].send(embed=embed)
 
-                        # Update global stats
-                        with sqlite3.connect("db/activitydata.db") as conn:
-                            conn.execute("UPDATE killcount SET activedata = activedata + 1")
-                            conn.commit()
-
-                        killer_data = st.execute("""SELECT p1.*, (SELECT COUNT(*) FROM stats p2 WHERE p2.kills > p1.kills) as KillRank FROM stats p1 WHERE user = ?""", (player_killer,)).fetchall()
-                        victim_data = st.execute("""SELECT p1.*, (SELECT COUNT(*) FROM stats p2 WHERE p2.kills > p1.kills) as KillRank FROM stats p1 WHERE user = ?""", (player_killed,)).fetchall()
-
-                        coords = re.findall(r'pos=<([^>]+)>', line)
-                        killer_coords = re.sub(r',\s*', ';', coords[0])
-                        killer_coords = re.sub(r'\.\d+', '', killer_coords)
-                        victim_coords = re.sub(r',\s*', ';', coords[1])
-                        victim_coords = re.sub(r'\.\d+', '', victim_coords)
-
-                        location = ""
-                        if can_use_locations:
-                            location = getClosestLocation(victim_coords) # Only for Chernarus
-
-                        weapon = re.search(r" with (.*) from", line) or re.search(r"with (.*)", line)
-                        weapon = weapon.group(1) if weapon else "Unknown"
-                        for key in Weapons.weapons['data']:
-                            if weapon == key:
-                                weapon = Weapons.weapons['data'][weapon]
-
-                        #templist = []
-                        #weaponstr = ''
-                        ##for i in emojis:
-                        ##    clean_weapon = weapon.replace('-', '').replace(' ', '')
-                        ##    if clean_weapon == i.name or clean_weapon == i.name[:-1]:
-                        ##        emojiinstance = str(i)
-                        ##        organized = emojiinstance.split(':')
-                        ##        templist.append(organized)
-                        #if templist:
-                        #    weaponstr += '\n# '
-                        #    templist = sorted(templist, key=lambda x: x[1][-1])
-                        #    weaponstr += ''.join(':' + ':'.join(i) for i in templist)
+                    # Check PvP kills
+                    elif killfeed_events.is_pvp_kill_event(line):
+                        counter_deaths += 1
+                        counter_kills += 1
+                        logger.info("PvP event detected")
 
                         try:
-                            distance = round(float(re.search(r"from ([0-9.]+) meters", line).group(1)), 2)
-                        except AttributeError:
-                            distance = 0.0
+                            player_killer, player_killed = killfeed_helpers.extract_killer_victim(line)
+                            logger.debug(f"Extracted - Killer: '{player_killer}', Victim: '{player_killed}'")
+                            
+                            if not player_killer or not player_killed:
+                                logger.warning(f"Failed to extract killer/victim from: {line}")
+                                continue
+                            
+                            timestamp = killfeed_helpers.extract_timestamp(line)
+                            timestamp_str = await killfeed_helpers.time_func(timestamp)
 
-                        embed = discord.Embed(
-                            title=f"PvP Kill | {timestamp}",
-                            description=f"""**{player_killer}** killed **{player_killed}**
+                            # Ensure both players exist and update stats with fresh connection
+                            conn_ensure = killfeed_database.get_connection()
+                            cursor_ensure = conn_ensure.cursor()
+                            killfeed_database.check_user_exists(cursor_ensure, player_killer, conn_ensure)
+                            killfeed_database.check_user_exists(cursor_ensure, player_killed, conn_ensure)
+                            conn_ensure.close()
+                            
+                            # Update stats using fresh connection
+                            conn_stats = killfeed_database.get_connection()
+                            cursor_stats = conn_stats.cursor()
+                            killfeed_database.update_kill_stats(cursor_stats, player_killer, player_killed, conn_stats)
+                            conn_stats.close()
+                            logger.info(f"Stats updated: {player_killer} killed {player_killed}")
 
-                **Weapon**: `{weapon}` ({distance}m) {'hit' if current_bodypart else ''} {current_bodypart}
-                **[Killer]({dayz + killer_coords}) - [Victim]({dayz + victim_coords})**
-                **{player_killer}'s Stats**:
-                K/D - {(round(killer_data[0][1]/killer_data[0][2], 2)) if float(killer_data[0][2]) > 0 else float(killer_data[0][1])} | {killer_data[0][2]} Death{'s' if float(killer_data[0][2]) > 1 else ''}  {killer_data[0][1]} Kill{'s' if float(killer_data[0][1]) > 1 else ''} | Ranked #{killer_data[0][10] if float(killer_data[0][10]) > 0 else '1'} Kills
-                Killstreak - {killer_data[0][5]}
-                **{player_killed}'s Stats:**
-                K/D - {round(victim_data[0][1]/victim_data[0][2], 2) if victim_data[0][2] != 0 else victim_data[0][1]} | {victim_data[0][2]} Death{'s' if victim_data[0][2] > 1 else ''} {victim_data[0][1]} Kill{'s' if victim_data[0][1] > 1 else ''} | Ranked #{victim_data[0][10] if victim_data[0][10] > 0 else '1'} Deaths
-                DeathStreak - {victim_data[0][4]}
-                {'Time Alive - ' if int(int(seconds) + hours + minutes + days) > 0 else ''}{timealivestr}
-                """,
-                            color=0xE40000,
-                        ).set_thumbnail(url=Config.EMBED_IMAGE).set_footer(text=Config.EMBED_FOOTER, icon_url=Config.EMBED_FOOTER_IMAGE)
+                            # Calculate time alive
+                            conn_temp = killfeed_database.get_connection()
+                            cursor_temp = conn_temp.cursor()
+                            cursor_temp.execute("SELECT alivetime FROM stats WHERE user = ?", (player_killed,))
+                            result = cursor_temp.fetchone()
+                            conn_temp.close()
+                            timealive_ts = result[0] if result else int(time.time())
+                            timealive = datetime.now() - datetime.fromtimestamp(timealive_ts)
+                            days = timealive.days
+                            hours, remainder = divmod(timealive.seconds, 3600)
+                            minutes, seconds = divmod(remainder, 60)
+                            seconds += timealive.microseconds / 1e6
+                            timealivestr = killfeed_helpers.format_time_alive(int(seconds), minutes, hours, days)
 
-                        await channel_map["kill"].send(embed=embed)
+                            # Update global stats (using consolidated database)
+                            killfeed_database.increment_activity_counters(kills=1, deaths=0)
 
-                    except Exception as e:
-                        print(e)
-                        exc_type, exc_obj, exc_tb = sys.exc_info()
-                        fname = os.path.split(exc_tb.tb_frame.f_code.co_filename)[1]
-                        print(exc_type, fname, exc_tb.tb_lineno)
-                        continue
+                            # Get player stats
+                            killer_stats = killfeed_database.get_player_stats(st, player_killer)
+                            victim_stats = killfeed_database.get_player_stats(st, player_killed)
 
-                elif "bled out" in line:
-                    timestamp = str(re.search(r"(\d+:\d+:\d+)", line).group(1))
-                    timestamp = await timeFunc(timestamp)
-                    victim = str(re.search(r'Player\s+"?(.*?)"?\s+\(.*?\)', line).group(1)).strip(' "\'')
-                    embed = discord.Embed(
-                        title=f"Bled Out | {timestamp}",
-                        description=f"**{victim}** bled out",
-                        color=0xE40000,
-                    )
-                    await channel_map["death"].send(embed=embed)
+                            # Extract coordinates
+                            coords = killfeed_helpers.extract_coordinates_from_line(line)
+                            killer_coords = killfeed_helpers.format_coordinates(coords[0]) if coords else ""
+                            victim_coords = killfeed_helpers.format_coordinates(coords[1]) if len(coords) > 1 else ""
 
-                elif any(wolf in line for wolf in ["Animal_CanisLupus_Grey", "Animal_CanisLupus_White"]):
-                    timestamp = str(re.search(r"(\d+:\d+:\d+)", line).group(1))
-                    timestamp = await timeFunc(timestamp)
-                    victim = str(re.search(r'Player\s+"?(.*?)"?\s+\(.*?\)', line).group(1)).strip(' "\'')
-                    counter_deaths += 1
-                    embed = discord.Embed(
-                        title=f"Wolf Kill | {timestamp}",
-                        description=f"**{victim}** was killed by a Wolf",
-                        color=0xE40000,
-                    )
-                    await channel_map["death"].send(embed=embed)
+                            # Get location if available
+                            location = ""
+                            if can_use_locations:
+                                location = getClosestLocation(victim_coords) if victim_coords else ""
 
-                elif any(bear in line for bear in ["Animal_UrsusArctos", "Brown Bear"]):
-                    timestamp = str(re.search(r"(\d+:\d+:\d+)", line).group(1))
-                    timestamp = await timeFunc(timestamp)
-                    victim = str(re.search(r'Player\s+"?(.*?)"?\s+\(.*?\)', line).group(1)).strip(' "\'')
-                    counter_deaths += 1
-                    embed = discord.Embed(
-                        title=f"Bear Kill | {timestamp}",
-                        description=f"**{victim}** was killed by a Bear",
-                        color=0xE40000,
-                    )
-                    await channel_map["death"].send(embed=embed)
+                            # Extract weapon
+                            weapon = killfeed_helpers.extract_weapon(line, Weapons.weapons)
 
-                elif "hit by FallDamage" in line:
-                    timestamp = str(re.search(r"(\d+:\d+:\d+)", line).group(1))
-                    timestamp = await timeFunc(timestamp)
-                    victim = str(re.search(r'Player\s+"?(.*?)"?\s+\(.*?\)', line).group(1)).strip(' "\'')
-                    counter_deaths += 1
-                    embed = discord.Embed(
-                        title=f"Fall Death | {timestamp}",
-                        description=f"**{victim}** fell to their death",
-                        color=0xE40000,
-                    )
-                    await channel_map["death"].send(embed=embed)
+                            # Extract distance
+                            distance = killfeed_helpers.extract_distance(line)
 
-                elif "died" in line:
-                    timestamp = str(re.search(r"(\d+:\d+:\d+)", line).group(1))
-                    timestamp = await timeFunc(timestamp)
-                    victim = str(re.search(r'Player\s+"?(.*?)"?\s+\(.*?\)', line).group(1)).strip(' "\'')
-                    counter_deaths += 1
-                    embed = discord.Embed(
-                        title=f"Died | {timestamp}",
-                        description=f"**{victim}** died",
-                        color=0xE40000,
-                    )
-                    await channel_map["death"].send(embed=embed)
+                            # Create embed
+                            embed = await killfeed_events.create_pvp_kill_embed(
+                                player_killer, player_killed, weapon, distance, current_bodypart,
+                                timestamp_str, killer_stats, victim_stats, timealivestr, dayz
+                            )
+                            
+                            # Add coordinate links if available
+                            if killer_coords and victim_coords:
+                                embed.description = embed.description.replace(
+                                    "**[Killer]" ,
+                                    f"**[Killer]({dayz + killer_coords}) - [Victim]({dayz + victim_coords})**"
+                                )
 
-                    #except Exception as e:
-                    #    print(e)
-                    #    continue
+                            if channel_map["kill"]:
+                                await channel_map["kill"].send(embed=embed)
+
+                        except Exception as e:
+                            logger.error(f"Error processing PvP kill: {e}")
+                            logger.exception(e)
+
+                    # Generic death as last resort
+                    elif killfeed_events.is_death_event(line) and "died" in line:
+                        counter_deaths += 1
+                        timestamp = killfeed_helpers.extract_timestamp(line)
+                        timestamp_str = await killfeed_helpers.time_func(timestamp)
+                        victim = killfeed_helpers.extract_player_name(line)
+                        embed = await killfeed_events.create_generic_death_embed(victim, timestamp_str)
+                        if channel_map["death"]:
+                            await channel_map["death"].send(embed=embed)
+
+                except Exception as e:
+                    logger.error(f"Error processing log line: {e}")
+                    continue
 
         # Commit aggregate stats to activity database
-        logging.info(f"[{server_id}] Log review complete. Activity - Kills: {counter_kills}, Deaths: {counter_deaths}")
-        site_db = sqlite3.connect("db/activitydata.db")
-        stats_cursor = site_db.cursor()
-        stats_cursor.execute("UPDATE killcount SET activedata = activedata + ?", (counter_kills,))
-        stats_cursor.execute("UPDATE deathcount SET activedata = activedata + ?", (counter_deaths,))
-        site_db.commit()
-        site_db.close()
+        logger.info(f"[{server_id}] Log review complete. Activity - Kills: {counter_kills}, Deaths: {counter_deaths}")
+        killfeed_database.increment_activity_counters(counter_kills, counter_deaths)
 
-        def update_series(table_name: str, value: int):
-            conn = sqlite3.connect('db/activitydata.db')
-            cursor = conn.cursor()
-            current = cursor.execute(f"SELECT activedata FROM {table_name}").fetchone()[0]
-            history = current.split(';')[1:]  # Skip first empty
-            history.append(str(value))
-            result = ';'.join([''] + history)
-            cursor.execute(f"UPDATE {table_name} SET activedata = ?", (result,))
-            conn.commit()
-            conn.close()
-
-        update_series('onlinecount', counter_online)
-        update_series('killdata', counter_kills)
-        update_series('deathdata', counter_deaths)
-        update_series('data', counter_activity)
+        # Update activity series
+        killfeed_database.update_series('onlinecount', counter_online)
+        killfeed_database.update_series('killdata', counter_kills)
+        killfeed_database.update_series('deathdata', counter_deaths)
+        killfeed_database.update_series('data', counter_activity)
 
         # Update Discord channel stats (only if there was new activity)
         if counter_kills > 0 or counter_deaths > 0:
             try:
-                activity_conn = sqlite3.connect('db/activitydata.db')
-                cur = activity_conn.cursor()
+                total_deaths = killfeed_database.get_total_deaths()
+                total_kills = killfeed_database.get_total_kills()
+                
                 if channel_map["deathcount"]:
-                    total_deaths = cur.execute('SELECT activedata FROM deathcount').fetchone()[0]
-                    await channel_map["deathcount"].edit(name=f"Total Deaths: {total_deaths}")
+                    try:
+                        #await channel_map["deathcount"].edit(name=f"Total Deaths: {total_deaths}")
+                        pass
+                    except Exception as e:
+                        logger.debug(f"Could not update deathcount channel: {e}")
                 if channel_map["killcount"]:
-                    total_kills = cur.execute('SELECT activedata FROM killcount').fetchone()[0]
-                    await channel_map["killcount"].edit(name=f"Total Kills: {total_kills}")
-                activity_conn.close()
-                logging.info(f"[{server_id}] Updated kill/death counters")
+                    try:
+                        #await channel_map["killcount"].edit(name=f"Total Kills: {total_kills}")
+                        pass
+                    except Exception as e:
+                        logger.debug(f"Could not update killcount channel: {e}")
+                    
+                logger.info(f"[{server_id}] Updated kill/death counters")
             except asyncio.TimeoutError:
-                logging.warning(f"[{server_id}] Discord API timeout when updating channels")
+                logger.warning(f"[{server_id}] Discord API timeout when updating channels")
             except Exception as e:
-                logging.error(f"[{server_id}] Error updating Discord channels: {e}")
+                logger.error(f"[{server_id}] Error updating Discord channels: {e}")
 
         # Finalize per-server processing state
         self.server_iterator += 1
@@ -508,130 +494,15 @@ class Killfeed(commands.Cog):
                     title="Player Location Heatmap",
                     description=f"Entries: {len(unique_locations)}\n<t:{int(time.mktime(datetime.now().timetuple()))}:R>",
                     color=0xE40000
-                ).set_image(url="attachment://heatmap.jpg") # A better implementation is desired (Maybe stream data instead?)
-                await channel_map["heatmap"].send(embed=heatmap_embed, file=discord.File("heatmap.jpg")) # A better implementation is desired (Maybe stream data instead?)
-                logging.info(f"[{server_id}] Heatmap sent with {len(unique_locations)} location entries")
+                ).set_image(url="attachment://heatmap.jpg")
+                if channel_map["heatmap"]:
+                    await channel_map["heatmap"].send(embed=heatmap_embed, file=discord.File("heatmap.jpg"))
+                logger.info(f"[{server_id}] Heatmap sent with {len(unique_locations)} location entries")
             except asyncio.TimeoutError:
-                logging.warning(f"[{server_id}] Discord API timeout when sending heatmap")
+                logger.warning(f"[{server_id}] Discord API timeout when sending heatmap")
             except Exception as e:
-                logging.error(f"[{server_id}] Error generating heatmap: {e}")
+                logger.error(f"[{server_id}] Error generating heatmap: {e}")
 
-async def fetch_server_log(self, server_id):
-    """
-    Downloads the log file for a given Nitrado server.
-    """
-    logging.info(f"[{server_id}] Initiating log download")
-
-    async with aiohttp.ClientSession() as session:
-        try:
-            # Optional: Fetch metadata
-            metadata = await session.get(
-                "https://api.nitrado.net/services", headers=self.headers
-            )
-            _ = await metadata.read()  # Discard or use later if needed
-
-            server_info = await session.get(
-                f"https://api.nitrado.net/services/{server_id}/gameservers",
-                headers=self.headers
-            )
-            if server_info.status != 200:
-                logging.warning(f"[{server_id}] Failed to fetch server info ({server_info.status})")
-                return False
-
-            details = await server_info.json()
-            username = details["data"]["gameserver"]["username"]
-            game_type = details["data"]["gameserver"]["game"].lower()
-            # Extract map from config
-            server_name = details["data"]["gameserver"].get("name", "").lower()
-            # Determine map from config name or default to chernarus
-            if "livonia" in server_name:
-                current_map = "livonia"
-            elif "namalsk" in server_name:
-                current_map = "namalsk"
-            else:
-                current_map = "chernarus"
-            self.server_maps[server_id] = current_map
-            logging.info(f"[{server_id}] Detected map: {current_map}")
-
-            if game_type == "dayzps":
-                relative_path = "dayzps/config/DayZServer_PS4_x64.ADM"
-            elif game_type == "dayzxb":
-                relative_path = "dayzxb/config/DayZServer_X1_x64.ADM"
-            else:
-                logging.error(f"[{server_id}] Unsupported game type: {game_type}")
-                return False
-            
-            # List directory to find the most recent .ADM file
-            config_dir = f"/games/{username}/noftp/{'/'.join(relative_path.split('/')[:-1])}"
-            list_endpoint = f"https://api.nitrado.net/services/{server_id}/gameservers/file_server/list?dir={config_dir}"
-            list_response = await session.get(list_endpoint, headers=self.headers)
-
-            if list_response.status != 200:
-                logging.error(f"[{server_id}] Failed to list directory ({list_response.status})")
-                return False
-
-            list_data = await list_response.json()
-            adm_files = [entry for entry in list_data["data"]["entries"] 
-                        if entry["type"] == "file" and entry["name"].endswith(".ADM")]
-
-            if not adm_files:
-                logging.error(f"[{server_id}] No .ADM files found in {config_dir}")
-                return False
-
-            most_recent_file = max(adm_files, key=lambda x: x["modified_at"])
-            file_path = most_recent_file["path"]
-
-            download_endpoint = f"https://api.nitrado.net/services/{server_id}/gameservers/file_server/download?file={file_path}"
-            
-            # List directory to find the most recent .ADM file
-            config_dir = f"/games/{username}/noftp/{'/'.join(relative_path.split('/')[:-1])}"
-            list_endpoint = f"https://api.nitrado.net/services/{server_id}/gameservers/file_server/list?dir={config_dir}"
-            list_response = await session.get(list_endpoint, headers=self.headers)
-
-            if list_response.status != 200:
-                logging.error(f"[{server_id}] Failed to list directory ({list_response.status})")
-                return False
-
-            list_data = await list_response.json()
-            adm_files = [entry for entry in list_data["data"]["entries"] 
-                        if entry["type"] == "file" and entry["name"].endswith(".ADM")]
-
-            if not adm_files:
-                logging.error(f"[{server_id}] No .ADM files found in {config_dir}")
-                return False
-
-            most_recent_file = max(adm_files, key=lambda x: x["modified_at"])
-            file_path = most_recent_file["path"]
-
-            download_endpoint = f"https://api.nitrado.net/services/{server_id}/gameservers/file_server/download?file={file_path}"
-            token_response = await session.get(download_endpoint, headers=self.headers)
-
-            if token_response.status != 200:
-                logging.error(f"[{server_id}] Failed to retrieve download token ({token_response.status}) ({token_response.content})")
-                logging.error(f"[{server_id}] Failed to retrieve download token ({token_response.status}) ({token_response.content})")
-                return False
-
-            token_data = await token_response.json()
-            download_url = token_data["data"]["token"]["url"]
-
-            file_response = await session.get(download_url, headers=self.headers)
-            if file_response.status != 200:
-                logging.error(f"[{server_id}] Log file download failed ({file_response.status})")
-                return False
-
-            local_fp = path.abspath(path.join(path.dirname(__file__), "..", "files", f"{server_id}.ADM"))
-            async with aiofiles.open(local_fp, mode="wb+") as f:
-                await f.write(await file_response.read())
-
-            logging.info(f"[{server_id}] Log download complete")
-            return True
-
-        except Exception as e:
-            logging.exception(f"[{server_id}] Exception during log fetch: {e}")
-            # Set default map on error
-            if server_id not in self.server_maps:
-                self.server_maps[server_id] = "chernarus"
-            return False
 
 
 async def setup(bot):

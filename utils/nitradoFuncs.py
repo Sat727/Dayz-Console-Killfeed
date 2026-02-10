@@ -2,13 +2,9 @@ from config import Config
 import aiohttp
 import json
 import requests
-import sqlite3
+from utils import killfeed_database
 
 class NitradoFunctions():
-    deviceban = sqlite3.connect("db/deviceidban.db")
-    dbans = deviceban.cursor()
-    stats = sqlite3.connect("db/stats.db")
-    st = stats.cursor()
 
     async def getSettings(self, id):
         headers = {"Authorization": f"Bearer {Config.NITRADO_TOKEN}"}
@@ -42,9 +38,7 @@ class NitradoFunctions():
             if username in currentBans:
                 return "User already banned"
 
-            self.st.execute("SELECT device_id FROM stats WHERE user = ?", (username,))
-            result = self.st.fetchone()
-            device_id = result[0] if result else None
+            device_id = killfeed_database.get_device_id_from_stats(username)
 
             banData += f'\r\n{username}'
             value = banData.replace("\\n", '\n').replace("\\r", '\r')
@@ -52,16 +46,10 @@ class NitradoFunctions():
 
             if resp == 200:
                 if device_id:
-                    self.dbans.execute(
-                        "INSERT OR REPLACE INTO deviceid_bans (username, device_id) VALUES (?, ?)",
-                        (username, device_id)
-                    )
+                    killfeed_database.insert_device_ban(username, device_id)
                     msg = f"Successfully added {username} (Device ID {device_id}) to the ban list"
                 else:
-                    self.dbans.execute(
-                        "INSERT OR REPLACE INTO deviceid_bans (username, device_id) VALUES (?, NULL)",
-                        (username,)
-                    )
+                    killfeed_database.insert_device_ban(username, None)
                     msg = f"Successfully added {username} to the ban list. Note: No device ID associated with the player."
                 print(msg)
                 return msg
@@ -80,7 +68,7 @@ class NitradoFunctions():
             resp = await self.postSetting('general', 'bans', value, id)
 
             if resp == 200:
-                self.dbans.execute("DELETE FROM deviceid_bans WHERE username = ?", (username,))
+                killfeed_database.unban_username(username)
                 msg = f"Successfully removed {username} from the ban list"
                 print(msg)
                 return msg

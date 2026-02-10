@@ -25,122 +25,42 @@ from typing import Union
 #        options = None
 
 Nitrado = NitradoFunctions()
-region = sqlite3.connect("db/region.db")
-rg = region.cursor()
-rg.execute("CREATE TABLE IF NOT EXISTS region (x, z, radius, channelid, name)")
-region.commit()
 
-database=sqlite3.connect('db/codes.db')
-c = database.cursor()
-c.execute("CREATE TABLE IF NOT EXISTS codes (code, data, redeemed, user, batchid)")
-database.commit()
+# Initialize consolidated database
+from utils import killfeed_database
+killfeed_database.initialize_master_db()
 
-stats = sqlite3.connect("db/stats.db")
-st = stats.cursor()
-st.execute("CREATE TABLE IF NOT EXISTS stats (user, kills int, deaths int, alivetime, deathstreak int, killstreak int, dcid, money, bounty, device_id)") # Money, Bounty values for possible implemention of economy
-stats.commit()
-
-
-servers = sqlite3.connect("db/servers.db")
-s = servers.cursor()
-s.execute("CREATE TABLE IF NOT EXISTS servers (serverid)")
-servers.commit()
-
-deviceban = sqlite3.connect("db/deviceidban.db")
-dbans = deviceban.cursor()
-dbans.execute('''CREATE TABLE IF NOT EXISTS deviceid_bans (
-                        username TEXT, 
-                        device_id TEXT)''')
-deviceban.commit()
-
-
+# Wrapper functions for backward compatibility
 def is_device_id_banned(device_id):
-    dbans.execute("SELECT 1 FROM deviceid_bans WHERE device_id = ?", (device_id,))
-    result = dbans.fetchone()
-    return result is not None
+    return killfeed_database.is_device_id_banned(device_id)
 
 def get_device_id_from_stats(username):
-    st.execute("SELECT device_id FROM stats WHERE user = ?", (username,))
-    result = st.fetchone()
-    return result[0] if result else None
+    return killfeed_database.get_device_id_from_stats(username)
 
 def get_all_banned_users():
-    conn = sqlite3.connect("db/deviceidban.db")
-    cursor = conn.cursor()
-    cursor.execute("SELECT username, device_id FROM deviceid_bans")
-    result = cursor.fetchall()
-    conn.close()
-    return result
+    return killfeed_database.get_all_banned_users()
 
 def unban_device_id(device_id):
-    conn = sqlite3.connect("db/deviceidban.db")
-    dbans = conn.cursor()
-
-    # Delete all rows with the device_id
-    dbans.execute("DELETE FROM deviceid_bans WHERE device_id = ?", (device_id,))
-    conn.commit()
-
-    conn.close()
+    killfeed_database.unban_device_id(device_id)
     
 
-categories = ("Build", "Death", "Kill", "Hit", "Heatmap", "BaseInteraction", "OnlineCount", 'DeathCount', 'KillCount', "BanNotification")
+categories = ("Build", "Death", "Kill", "Hit", "Heatmap", "BaseInteraction", "OnlineCount", 'DeathCount', 'KillCount', "BanNotification", "Connect", "Disconnect")
 
 def updateDatabase(categories=categories):
-    template = sqlite3.connect("db/template.db")
-    tem = template.cursor()
-    tem.execute("CREATE TABLE IF NOT EXISTS config (category, channelid)")
-    ins = [i for i in categories if i not in [i[0] for i in tem.execute("SELECT * FROM config").fetchall()]]
+    """Initialize config categories in the master database."""
     try:
-        tem.execute("SELECT * FROM config")
-        tem.execute("CREATE TABLE IF NOT EXISTS config (category, channelid)")
-        for i in ins:
-            tem.execute("INSERT or IGNORE INTO config (category, channelid) VALUES (?,NULL)", (i,))
-            template.commit()
-        print("Created template database")
+        # Get all registered servers
+        servers_list = killfeed_database.get_servers()
+        
+        # Initialize all config categories for each server
+        if servers_list:
+            for server in servers_list:
+                server_id = str(server[0])
+                for category in categories:
+                    killfeed_database.insert_config(server_id, category)
+        print("Database config initialized successfully")
     except Exception as e:
-        print(e)
-        print("Database template may have already been created. Skipping creation, and adding new setting if any")
-        for i in categories:
-            tem.execute("INSERT or IGNORE INTO config (category, channelid) VALUES (?,NULL)", (i,))
-            template.commit()
-    print("Updating database")
-    f = []
-    for (dirpath, dirnames, filenames) in os.walk('db'):
-        print(filenames)
-        f.append(filenames)
-    print(f)
-    print("Getting settings")
-    if len(f) > 1:
-        print('Printing list')
-        print(f)
-        f = ([i[:-3] for i in f[0] if i[:-3].isdigit()])
-    else:
-        print("Printing List")
-        print(f)
-        f = ([i[:-3] for i in f[0] if i.isdigit()])
-    print(f'Attempting to update {len(f)} databases.')
-    
-    print(f)
-    for fp in f:
-        entries = 0
-        main = sqlite3.connect(f"db/{fp}.db")
-        m = main.cursor()
-        ins = [i for i in categories if i not in [i[0] for i in m.execute("SELECT * FROM config").fetchall()]]
-        for l in ins:
-            m.execute("INSERT INTO 'config' (category, channelid) VALUES (?,NULL)", (l,))
-            entries = entries + 1
-        main.commit()
-        if len(m.execute("SELECT * FROM config").fetchall()) > len(categories):
-            print("The length of the end database larger than template. Popping rows...")
-            pop = len(m.execute("SELECT * FROM config").fetchall())
-            top = len(categories)
-            while pop >= top:
-                if pop == top:
-                    break
-                m.execute(f"DELETE FROM config WHERE rowid={pop}")
-                pop -= 1
-        main.commit()
-        print(f"Merged {entries} records from template into {fp}")
+        print(f"Error initializing database config: {e}")
 
 updateDatabase()
 
@@ -159,8 +79,7 @@ class ServerSelect(discord.ui.Select):
         self.action_type = action_type
         
         # Get servers from database
-        s.execute("SELECT * FROM servers")
-        servers_list = s.fetchall()
+        servers_list = killfeed_database.get_servers()
         
         options = []
         for server in servers_list:
@@ -180,11 +99,11 @@ class ServerSelect(discord.ui.Select):
     async def callback(self, interaction: discord.Interaction):
         # Only allow the user who invoked the command
         if interaction.user.id != self.user_id:
-            await interaction.response.send_message("You are not permitted to do this.", ephemeral=True)
+            await interaction.response.send_message("You are not permitted to do this.")
             return
         
         if self.values[0] == "none":
-            await interaction.response.send_message("No servers are configured. Use `/nitradoserver` to add one.", ephemeral=True)
+            await interaction.response.send_message("No servers are configured. Use `/nitradoserver` to add one.")
             return
         
         await self.callback_func(interaction, int(self.values[0]))
@@ -220,7 +139,7 @@ class ChannelSelect(discord.ui.Select):
     async def callback(self, interaction: discord.Interaction):
         # Only allow the user who invoked the command
         if interaction.user.id != self.user_id:
-            await interaction.response.send_message("You are not allowed to interact with this menu.", ephemeral=True)
+            await interaction.response.send_message("You are not allowed to interact with this menu.")
             return
         
         await self.callback_func(interaction, self.server_id, self.values[0])
@@ -261,13 +180,11 @@ class Commands(commands.Cog):
     @app_commands.checks.has_permissions(administrator=True)
     @app_commands.command(name="addarea", description="Set a location to be listened to by flag event")
     async def addarea(self, interaction:discord.Interaction, x_coord:float, z_coord:float, radius:int, channel:discord.TextChannel, name:str):
-        rg.execute("SELECT * FROM region")
-        rows = rg.fetchall()
-        if len(rows) > 25:
+        regions = killfeed_database.get_regions()
+        if len(regions) > 25:
             await interaction.response.send_message("You have more than 25 events. The limit is 25")
         else:
-            rg.execute("INSERT INTO region (x, z, radius, channelid, name) VALUES (?, ?, ?, ?, ?)", (x_coord, z_coord, radius, channel.id, name))
-            region.commit()
+            killfeed_database.insert_region(x_coord, z_coord, radius, channel.id, name)
             await interaction.response.send_message(f"Listening to flags at {x_coord} {z_coord} and posting to {channel}")
             await interaction.guild.id
 
@@ -308,12 +225,15 @@ class Commands(commands.Cog):
     async def terminatelastbatch(self, interaction:discord.Interaction):
         if len(self.lastbatch) > 0:
             count = 0
+            conn = killfeed_database.get_connection()
+            cursor = conn.cursor()
             for i in self.lastbatch:
-                c.execute("DELETE FROM codes WHERE code = ?", (i,))
+                cursor.execute("DELETE FROM codes WHERE code = ?", (i,))
                 count += 1
+            conn.commit()
+            conn.close()
             await interaction.response.send_message(f"Deleted {count} entries")
             self.lastbatch = []
-            database.commit()
         else:
             await interaction.response.send_message("Last batch not detected/already deleted")
 
@@ -329,11 +249,7 @@ class Commands(commands.Cog):
             if is_device_id_banned(device_id):
                 await interaction.response.send_message(f"Device ID {device_id} is already banned.")
             else:
-                conn = sqlite3.connect("db/deviceidban.db")
-                dbans = conn.cursor()
-                dbans.execute("INSERT INTO deviceid_bans (username, device_id) VALUES (?, ?)", ("Unknown", device_id))
-                conn.commit()
-                conn.close()
+                killfeed_database.insert_device_ban("Unknown", device_id)
                 await interaction.response.send_message(f"Successfully banned Device ID {device_id}.")
         elif username:
             device_id = get_device_id_from_stats(username)
@@ -341,11 +257,7 @@ class Commands(commands.Cog):
                 if is_device_id_banned(device_id):
                     await interaction.response.send_message(f"Device ID {device_id} associated with {username} is already banned.")
                 else:
-                    conn = sqlite3.connect("db/deviceidban.db")
-                    dbans = conn.cursor()
-                    dbans.execute("INSERT INTO deviceid_bans (username, device_id) VALUES (?, ?)", (username, device_id))
-                    conn.commit()
-                    conn.close()
+                    killfeed_database.insert_device_ban(username, device_id)
                     await interaction.response.send_message(f"Successfully banned {username} (Device ID {device_id}).")
             else:
                 await interaction.response.send_message(f"No device ID associated with {username}. Please provide the device ID manually.")
@@ -446,8 +358,13 @@ class Commands(commands.Cog):
     @app_commands.checks.has_permissions(administrator=True)
     @app_commands.command(name="terminatebatch", description="Deletes most recent generated keys")
     async def terminatebatch(self, interaction:discord.Interaction, batchid:int):
-        c.execute("DELETE FROM codes WHERE batchid = ?", (batchid,))
-        await interaction.response.send_message(f"Terminated {c.rowcount} codes from the database")
+        conn = killfeed_database.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM codes WHERE batchid = ?", (batchid,))
+        rowcount = cursor.rowcount
+        conn.commit()
+        conn.close()
+        await interaction.response.send_message(f"Terminated {rowcount} codes from the database")
 
     @app_commands.checks.has_permissions(administrator=True)
     @app_commands.choices(value=[
@@ -468,7 +385,10 @@ class Commands(commands.Cog):
                     codes = []
                     raw_string = f''
                     try:
-                        memory_db = [code[0] for code in c.execute("SELECT code FROM codes")]
+                        conn = killfeed_database.get_connection()
+                        cursor = conn.cursor()
+                        cursor.execute("SELECT code FROM codes")
+                        memory_db = [code[0] for code in cursor.fetchall()]
                         batchid = len(memory_db) + 1
                         with open('logs/audit.txt', 'a') as log:
                             log.write(f'{interaction.user} ({interaction.user.id}) Generated {amount} {value.value} Keys in {interaction.channel.name} ({interaction.channel.id}) at {datetime.datetime.now().strftime("%m/%d/%Y, %I:%M %p")}\n')
@@ -485,21 +405,22 @@ class Commands(commands.Cog):
                             raw_code = ''.join(l + '-' * (n % 5 == 4) for n, l in enumerate(co))[:-1]
                             batch.append(raw_code)
                             raw_string = raw_string + raw_code
-                            c.execute("INSERT INTO codes (code, data, redeemed, batchid) VALUES (?,?,?,?)", (raw_code, value.value, 1, batchid))
+                            cursor.execute("INSERT INTO codes (code, data, redeemed, batchid) VALUES (?,?,?,?)", (raw_code, value.value, 1, batchid))
                             raw_string += '\n'
                         self.lastbatch = batch
-                        database.commit()
-                        embed = discord.Embed(title=f"Generated {amount} {value.name} Keys", description=f'```\n{raw_string+"```"}', color=0xE40000()).set_footer(text=f'Batch ID: {batchid}')
+                        conn.commit()
+                        conn.close()
+                        embed = discord.Embed(title=f"Generated {amount} {value.name} Keys", description=f'```\n{raw_string+"```"}', color=0xE40000).set_footer(text=f'Batch ID: {batchid}')
                         await choice.response.send_message(embed=embed)
                         await choice.message.delete()
                     except Exception as e:
                         print(e)
                 elif choice.data.get('custom_id') == "1":
-                    await choice.response.send_message("Aborted key generation", ephemeral=True)
+                    await choice.response.send_message("Aborted key generation")
                     await choice.message.delete()
             else:
                 print("Unauthorized button use")
-                await choice.response.send_message("You do not have permission to select this!",ephemeral=True)
+                await choice.response.send_message("You do not have permission to select this!")
         no_button.callback = selection
         yes_button.callback = selection
         views.add_item(no_button)
@@ -508,65 +429,120 @@ class Commands(commands.Cog):
 
     @app_commands.command(name="redeem", description="Redeem keys")
     async def redeem(self, interaction:discord.Interaction):
-        class Redeem(discord.ui.Modal, title='Key Redemption'):
-            username = discord.ui.TextInput(label='Username', required=True, style=discord.TextStyle.short, max_length=16, min_length=3)
-            code = discord.ui.TextInput(label='Code', required=True, max_length=29, min_length=29, style=discord.TextStyle.long)
-            async def on_submit(self, interaction: discord.Interaction):
-                query = c.execute("SELECT * FROM codes WHERE code=?", (str(self.code),)).fetchall()
-                if len(query) == 1:
-                    if query[0][2] == 1:
-                        if re.compile(r'[a-zA-Z0-9-_]*$').match(str(self.username)):
-                            rows = c.execute("SELECT code FROM codes WHERE code = ?", (str(self.code),)).fetchall()
-                            print(rows)
-                            if len(rows) > 0:
-                                print("Test")
-                                try:
-                                    with open('logs/audit.txt', 'a') as log:
-                                        log.write(f'{interaction.user} ({interaction.user.id}) Redeemed code in {interaction.channel.name} ({interaction.channel.id}) for username {self.username} at {datetime.datetime.now().strftime("%m/%d/%Y, %I:%M %p")}\n')
-                                        print("Passed x1")
-                                except Exception as e:
-                                    print(e)
-                                data = str(await Nitrado.Priority(id=16655698, username=self.username, priority='Add'))
-                                print(data)
-                                if data.startswith("Successful"):
-                                    c.execute("UPDATE codes SET redeemed = ?, user = ? WHERE code = ?", (0,str(self.username), str(self.code)))
-                                    database.commit()
-                                    await interaction.response.send_message(f"Redeemed {query[0][1]} for {self.username} on PS4")
+        servers_list = killfeed_database.get_servers()
+        
+        if not servers_list:
+            await interaction.response.send_message("No servers added to the database. Use `/nitradoserver` to add one.")
+            return
+        
+        class ServerSelect(discord.ui.Select):
+            def __init__(inner_self):
+                options = [
+                    discord.SelectOption(label=f"Server {server[0]}", value=str(server[0]))
+                    for server in servers_list
+                ]
+                super().__init__(
+                    placeholder="Choose a server to redeem on...",
+                    min_values=1,
+                    max_values=1,
+                    options=options
+                )
+            
+            async def callback(inner_self, select_interaction: discord.Interaction):
+                if select_interaction.user.id != interaction.user.id:
+                    await select_interaction.response.send_message("You are not permitted to do this.")
+                    return
+                
+                selected_server_id = int(inner_self.values[0])
+                
+                class Redeem(discord.ui.Modal, title='Key Redemption'):
+                    username = discord.ui.TextInput(label='Username', required=True, style=discord.TextStyle.short, max_length=16, min_length=3)
+                    code = discord.ui.TextInput(label='Code', required=True, max_length=29, min_length=29, style=discord.TextStyle.long)
+                    
+                    async def on_submit(modal_self, modal_interaction: discord.Interaction):
+                        conn = killfeed_database.get_connection()
+                        cursor = conn.cursor()
+                        cursor.execute("SELECT * FROM codes WHERE code=?", (str(modal_self.code),))
+                        query = cursor.fetchall()
+                        if len(query) == 1:
+                            if query[0][3] == 1:  # redeemed column is at index 3 now
+                                if re.compile(r'[a-zA-Z0-9-_]*$').match(str(modal_self.username)):
+                                    cursor.execute("SELECT code FROM codes WHERE code = ?", (str(modal_self.code),))
+                                    rows = cursor.fetchall()
+                                    print(rows)
+                                    if len(rows) > 0:
+                                        try:
+                                            with open('logs/audit.txt', 'a') as log:
+                                                log.write(f'{modal_interaction.user} ({modal_interaction.user.id}) Redeemed code in {modal_interaction.channel.name} ({modal_interaction.channel.id}) for username {modal_self.username} at {datetime.datetime.now().strftime("%m/%d/%Y, %I:%M %p")}\n')
+                                                print("Passed x1")
+                                        except Exception as e:
+                                            print(e)
+                                        data = str(await Nitrado.Priority(id=selected_server_id, username=modal_self.username, priority='Add'))
+                                        print(data)
+                                        if data.startswith("Successful"):
+                                            cursor.execute("UPDATE codes SET redeemed = ?, user = ? WHERE code = ?", (0, str(modal_self.username), str(modal_self.code)))
+                                            conn.commit()
+                                            conn.close()
+                                            await modal_interaction.response.send_message(f"✓ Redeemed {query[0][2]} for {modal_self.username} on server {selected_server_id}")  # data column is at index 2
+                                        else:
+                                            conn.close()
+                                            await modal_interaction.response.send_message(data)
                                 else:
-                                    await interaction.response.send_message(data)
+                                    await modal_interaction.response.send_message("Invalid username. Please try again!")
+                            elif query[0][2] == 0:
+                                await modal_interaction.response.send_message("Code already redeemed!")
                         else:
-                            await interaction.response.send_message("Invalid username. Please try again!")
-                    elif query[0][2] == 0:
-                        await interaction.response.send_message("Code already redeemed!")
-                else:
-                    await interaction.response.send_message("Invalid code!")
-        await interaction.response.send_modal(Redeem())
+                            await modal_interaction.response.send_message("Invalid code!")
+                
+                await select_interaction.response.send_modal(Redeem())
+        
+        class ServerSelectView(discord.ui.View):
+            def __init__(self):
+                super().__init__()
+                self.add_item(ServerSelect())
+        
+        await interaction.response.send_message(
+            "Select a server to redeem your key on:",
+            view=ServerSelectView()
+        )
     @app_commands.checks.has_permissions(administrator=True)
     @app_commands.command(name="removearea", description="Remove a flag listener")
     async def removearea(self, interaction:discord.Interaction):
-        rg.execute("SELECT * FROM region")
-        rows = rg.fetchall()
+        rows = killfeed_database.get_regions()
         select = discord.ui.Select()
         select.placeholder = "Which area would you like to remove?"
         c = 0
         if rows == []:
             await interaction.response.send_message("No areas to remove. Create one using /addarea")
             return
+        
+        region_data = {}
         for i in rows:
-            c+=1
-            select.add_option(label=f"{i[-1]}",description=f"X:{i[0]}, {i[1]}",value=c)
+            c += 1
+            region_name = i[-1]
+            region_data[c] = region_name
+            select.add_option(label=f"{region_name}", description=f"X:{i[0]}, Z:{i[1]}", value=str(c))
+        
         select.max_values = 1
         view = discord.ui.View()
         view.add_item(select)
-        async def callback(interaction:discord.Interaction):
-            rg.execute(f"DELETE FROM region WHERE name = ?", (i[-1],))
-            region.commit()
-            await interaction.response.send_message(f"Deleted {i[-1]} from your listeners")
+        
+        async def callback(select_interaction: discord.Interaction):
+            selected_idx = int(select.values[0])
+            region_name = region_data[selected_idx]
+            
+            conn = killfeed_database.get_connection()
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM region WHERE name = ?", (region_name,))
+            conn.commit()
+            conn.close()
+            
+            await select_interaction.response.send_message(f"Deleted {region_name} from your listeners")
             view.stop()
+        
         select.callback = callback
         r = await interaction.response.send_message(view=view)
-        view.wait()
-        await r.delete()
+        await view.wait()
 
     #@app_commands.checks.has_permissions(administrator=True)
     #@app_commands.command(name="staffgive", description="Give someone money for currency")
@@ -586,11 +562,10 @@ class Commands(commands.Cog):
     @app_commands.command(name="banlist", description="Banlist Options")
     async def banlist(self, interaction:discord.Interaction, username:str, action:app_commands.Choice[str]):
         """Banlist management with server selection dropdown"""
-        s.execute("SELECT * FROM servers")
-        servers_list = s.fetchall()
+        servers_list = killfeed_database.get_servers()
         
         if not servers_list:
-            await interaction.response.send_message("No servers added to the database. Use `/nitradoserver` to add one.", ephemeral=True)
+            await interaction.response.send_message("No servers added to the database. Use `/nitradoserver` to add one.")
             return
         
         async def banlist_callback(cb_interaction: discord.Interaction, server_id: int):
@@ -601,7 +576,7 @@ class Commands(commands.Cog):
                 data = data.decode('utf-8')
             # Ensure data is not empty
             message = data if data else "Ban action completed."
-            await cb_interaction.followup.send(message)
+            await cb_interaction.message.edit(content=f" {message}", view=None)
         
         class BanListServerSelect(discord.ui.Select):
             def __init__(self):
@@ -618,7 +593,7 @@ class Commands(commands.Cog):
             
             async def callback(self, sel_interaction: discord.Interaction):
                 if sel_interaction.user.id != interaction.user.id:
-                    await sel_interaction.response.send_message("You are not permitted to do this.", ephemeral=True)
+                    await sel_interaction.response.send_message("You are not permitted to do this.")
                     return
                 
                 await banlist_callback(sel_interaction, int(self.values[0]))
@@ -630,10 +605,8 @@ class Commands(commands.Cog):
         
         await interaction.response.send_message(
             f"Select a server to manage banlist for **{username}** (Action: {action.name}):",
-            view=BanListServerView(),
-            ephemeral=True
+            view=BanListServerView()
         )
-
     @app_commands.checks.has_permissions(administrator=True)
     @app_commands.choices(action=[
         app_commands.Choice(name="Add", value="Add someone"),
@@ -642,11 +615,9 @@ class Commands(commands.Cog):
     @app_commands.command(name="priority", description="Priority Options")
     async def priority(self, interaction:discord.Interaction, username:str, action:app_commands.Choice[str]):
         """Priority management with server selection dropdown"""
-        s.execute("SELECT * FROM servers")
-        servers_list = s.fetchall()
-        
+        servers_list = killfeed_database.get_servers()
         if not servers_list:
-            await interaction.response.send_message("No servers added to the database. Use `/nitradoserver` to add one.", ephemeral=True)
+            await interaction.response.send_message("No servers added to the database. Use `/nitradoserver` to add one.")
             return
         
         async def priority_callback(cb_interaction: discord.Interaction, server_id: int):
@@ -657,7 +628,7 @@ class Commands(commands.Cog):
                 data = data.decode('utf-8')
             # Ensure data is not empty
             message = data if data else "Priority action completed."
-            await cb_interaction.followup.send(message)
+            await cb_interaction.message.edit(content=f" {message}", view=None)
         
         class PriorityServerSelect(discord.ui.Select):
             def __init__(self):
@@ -674,7 +645,7 @@ class Commands(commands.Cog):
             
             async def callback(self, sel_interaction: discord.Interaction):
                 if sel_interaction.user.id != interaction.user.id:
-                    await sel_interaction.response.send_message("You are not permitted to do this.", ephemeral=True)
+                    await sel_interaction.response.send_message("You are not permitted to do this.")
                     return
                 
                 await priority_callback(sel_interaction, int(self.values[0]))
@@ -686,8 +657,7 @@ class Commands(commands.Cog):
         
         await interaction.response.send_message(
             f"Select a server to manage priority for **{username}** (Action: {action.name}):",
-            view=PriorityServerView(),
-            ephemeral=True
+            view=PriorityServerView()
         )
 
     #@app_commands.checks.has_permissions(administrator=True)
@@ -704,11 +674,10 @@ class Commands(commands.Cog):
     @app_commands.command(name="logconfig", description="Change the output of logs")
     async def logconfig(self, interaction:discord.Interaction):
         """Interactive log configuration using dropdown menus"""
-        s.execute("SELECT * FROM servers")
-        servers_list = s.fetchall()
+        servers_list = killfeed_database.get_servers()
         
         if not servers_list:
-            await interaction.response.send_message("No servers added to the database. Use `/nitradoserver` to add one.", ephemeral=True)
+            await interaction.response.send_message("No servers added to the database. Use `/nitradoserver` to add one.")
             return
         
         async def select_category_callback(ctx_interaction: discord.Interaction, server_id: int, category: str):
@@ -716,14 +685,11 @@ class Commands(commands.Cog):
             # Create a channel select view
             async def select_channel_callback(final_interaction: discord.Interaction, channel: discord.TextChannel | discord.VoiceChannel):
                 """Callback for when user selects a channel"""
-                logchannels = sqlite3.connect(f"db/{server_id}.db")
-                lc = logchannels.cursor()
-                lc.execute("UPDATE config SET channelid = ? WHERE category = ?", (channel.id, category))
-                logchannels.commit()
-                logchannels.close()
-                await final_interaction.response.send_message(
-                    f"Updated server `{server_id}` to send `{category}` logs to {channel.mention}",
-                    ephemeral=True
+                await final_interaction.response.defer()
+                killfeed_database.update_config(str(server_id), category, channel.id)
+                await final_interaction.message.edit(
+                    content=f"Updated server `{server_id}` to send `{category}` logs to {channel.mention}",
+                    view=None
                 )
             
             # Create custom view with channels
@@ -741,14 +707,14 @@ class Commands(commands.Cog):
                 
                 async def channel_callback(self, ch_interaction: discord.Interaction):
                     if ch_interaction.user.id != interaction.user.id:
-                        await ch_interaction.response.send_message("You are not allowed to interact with this menu.", ephemeral=True)
+                        await ch_interaction.response.send_message("You are not allowed to interact with this menu.")
                         return
                     await select_channel_callback(ch_interaction, self.select_channel.values[0])
             
-            await ctx_interaction.response.send_message(
-                f"Select a channel for `{category}` logs:",
-                view=ChannelView(),
-                ephemeral=True
+            await ctx_interaction.response.defer()
+            await ctx_interaction.message.edit(
+                content=f"Select a channel for `{category}` logs:",
+                view=ChannelView()
             )
         
         # Create server select view
@@ -767,7 +733,7 @@ class Commands(commands.Cog):
             
             async def callback(self, sel_interaction: discord.Interaction):
                 if sel_interaction.user.id != interaction.user.id:
-                    await sel_interaction.response.send_message("You are not allowed to interact with this menu.", ephemeral=True)
+                    await sel_interaction.response.send_message("You are not allowed to interact with this menu.")
                     return
                 
                 server_id = int(self.values[0])
@@ -788,7 +754,7 @@ class Commands(commands.Cog):
                     
                     async def callback(self, cat_interaction: discord.Interaction):
                         if cat_interaction.user.id != interaction.user.id:
-                            await cat_interaction.response.send_message("You are not allowed to interact with this menu.", ephemeral=True)
+                            await cat_interaction.response.send_message("You are not allowed to interact with this menu.")
                             return
                         
                         await select_category_callback(cat_interaction, server_id, self.values[0])
@@ -798,10 +764,10 @@ class Commands(commands.Cog):
                         super().__init__()
                         self.add_item(CategorySelect())
                 
-                await sel_interaction.response.send_message(
-                    f"Select a log category for server `{server_id}`:",
-                    view=CategorySelectView(),
-                    ephemeral=True
+                await sel_interaction.response.defer()
+                await sel_interaction.message.edit(
+                    content=f"Select a log category for server `{server_id}`:",
+                    view=CategorySelectView()
                 )
         
         class ServerSelectViewForLogConfig(discord.ui.View):
@@ -811,8 +777,7 @@ class Commands(commands.Cog):
         
         await interaction.response.send_message(
             "Select a server to configure:",
-            view=ServerSelectViewForLogConfig(),
-            ephemeral=True
+            view=ServerSelectViewForLogConfig()
         )
 
 
@@ -830,53 +795,42 @@ class Commands(commands.Cog):
                 
                 async def on_submit(self, modal_interaction: discord.Interaction):
                     if modal_interaction.user.id != interaction.user.id:
-                        await modal_interaction.response.send_message("You are not allowed to submit this form.", ephemeral=True)
+                        await modal_interaction.response.send_message("You are not allowed to submit this form.")
                         return
                     
                     try:
                         nitradoserver = int(self.server_id.value)
                     except ValueError:
-                        await modal_interaction.response.send_message("Server ID must be a number.", ephemeral=True)
+                        await modal_interaction.response.send_message("Server ID must be a number.")
                         return
                     
-                    s.execute("SELECT * FROM servers")
-                    r = s.fetchall()
+                    servers_list = killfeed_database.get_servers()
+                    r = servers_list
                     
                     try:
                         if nitradoserver not in [i[0] for i in r]:
-                            logchannels = sqlite3.connect(f"db/{nitradoserver}.db")
-                            lc = logchannels.cursor()
-                            lc.execute("CREATE TABLE IF NOT EXISTS config (category, channelid)")
-                            for i in self.categories:
-                                lc.execute("INSERT INTO config (category, channelid) VALUES (?,NULL)", (i,))
-                            logchannels.commit()
-                            logchannels.close()
-                            s.execute("INSERT INTO servers (serverid) VALUES (?)", (nitradoserver,))
-                            servers.commit()
-                            await modal_interaction.response.send_message(f"Initialized server `{nitradoserver}`\nUse `/logconfig` to configure the server.", ephemeral=True)
+                            # Initialize config for new server
+                            for category in categories:
+                                killfeed_database.insert_config(str(nitradoserver), category)
+                            killfeed_database.insert_server(str(nitradoserver))
+                            await modal_interaction.response.send_message(f"Initialized server `{nitradoserver}`\nUse `/logconfig` to configure the server.")
                         else:
-                            await modal_interaction.response.send_message("This nitrado server already exists in the database.", ephemeral=True)
+                            await modal_interaction.response.send_message("This nitrado server already exists in the database.")
                     except Exception as e:
-                        logchannels = sqlite3.connect(f"db/{nitradoserver}.db")
-                        lc = logchannels.cursor()
-                        lc.execute("CREATE TABLE IF NOT EXISTS config (category, channelid)")
-                        for i in self.categories:
-                            lc.execute("INSERT INTO config (category, channelid) VALUES (?, 0)", (i,))
-                        logchannels.commit()
-                        logchannels.close()
-                        s.execute("INSERT INTO servers (serverid) VALUES (?)", (nitradoserver,))
-                        servers.commit()
-                        await modal_interaction.response.send_message(f"Initialized server `{nitradoserver}`\nUse `/logconfig` to configure the server.", ephemeral=True)
+                        # Initialize config for new server if error
+                        for category in categories:
+                            killfeed_database.insert_config(str(nitradoserver), category)
+                        killfeed_database.insert_server(str(nitradoserver))
+                        await modal_interaction.response.send_message(f"Initialized server `{nitradoserver}`\nUse `/logconfig` to configure the server.")
             
             await interaction.response.send_modal(AddServerModal())
         
         elif action.name == "Remove":
             # For removing, use a dropdown
-            s.execute("SELECT * FROM servers")
-            servers_list = s.fetchall()
+            servers_list = killfeed_database.get_servers()
             
             if not servers_list:
-                await interaction.response.send_message("No servers in the database to remove.", ephemeral=True)
+                await interaction.response.send_message("No servers in the database to remove.")
                 return
             
             class RemoveServerSelect(discord.ui.Select):
@@ -894,18 +848,28 @@ class Commands(commands.Cog):
                 
                 async def callback(self, sel_interaction: discord.Interaction):
                     if sel_interaction.user.id != interaction.user.id:
-                        await sel_interaction.response.send_message("You are not allowed to interact with this menu.", ephemeral=True)
+                        await sel_interaction.response.send_message("You are not allowed to interact with this menu.")
                         return
                     
+                    await sel_interaction.response.defer()
                     server_id = int(self.values[0])
                     
                     try:
                         os.remove(f"db/{server_id}.db")
-                        s.execute(f"DELETE FROM servers WHERE serverid = ?", (server_id,))
-                        servers.commit()
-                        await sel_interaction.response.send_message(f"Removed server `{server_id}` from the database.", ephemeral=True)
+                        conn = killfeed_database.get_connection()
+                        cursor = conn.cursor()
+                        cursor.execute("DELETE FROM servers WHERE serverid = ?", (server_id,))
+                        conn.commit()
+                        conn.close()
+                        await sel_interaction.message.edit(
+                            content=f"Removed server `{server_id}` from the database.",
+                            view=None
+                        )
                     except Exception as e:
-                        await sel_interaction.response.send_message(f"Error removing server: {str(e)}", ephemeral=True)
+                        await sel_interaction.message.edit(
+                            content=f"Error removing server: {str(e)}",
+                            view=None
+                        )
             
             class RemoveServerView(discord.ui.View):
                 def __init__(self):
@@ -915,7 +879,6 @@ class Commands(commands.Cog):
             await interaction.response.send_message(
                 "Select a server to remove:",
                 view=RemoveServerView(),
-                ephemeral=True
             )
 
 
@@ -966,15 +929,15 @@ class Commands(commands.Cog):
     @app_commands.command(name="generateallheatmap", description="Generates a heatmap with all player movement positions for the log file")
     async def maxkillfeed(self, interaction:discord.Interaction):
         """Generate heatmap with server selection dropdown"""
-        s.execute("SELECT * FROM servers")
-        servers_list = s.fetchall()
+        servers_list = killfeed_database.get_servers()
         
         if not servers_list:
-            await interaction.response.send_message("No servers added to the database. Use `/nitradoserver` to add one.", ephemeral=True)
+            await interaction.response.send_message("No servers added to the database. Use `/nitradoserver` to add one.")
             return
         
         async def heatmap_callback(cb_interaction: discord.Interaction, serverid: int):
             await cb_interaction.response.defer()
+            await cb_interaction.message.edit(content=f"Generating heatmap for server `{serverid}`...", view=None)
             fp = path.abspath(
                 path.join(path.dirname(__file__), "..", "files", f"{serverid}.ADM")
             )
@@ -989,10 +952,11 @@ class Commands(commands.Cog):
                 generate_heatmap('./utils/y.jpg', playercoords)
                 embed = discord.Embed(title="Player Location Heatmap (All)",description=f'Entries: {len(playercoords)}', color=0xE40000).set_image(url="attachment://heatmap.jpg")
                 await cb_interaction.followup.send(embed=embed, file=discord.File("heatmap.jpg"))
+                await cb_interaction.message.edit(content=f"Heatmap generated for server `{serverid}`")
             except FileNotFoundError:
-                await cb_interaction.followup.send(f"Log file not found for server `{serverid}`.", ephemeral=True)
+                await cb_interaction.message.edit(content=f" Log file not found for server `{serverid}`.")
             except Exception as e:
-                await cb_interaction.followup.send(f"Error generating heatmap: {str(e)}", ephemeral=True)
+                await cb_interaction.message.edit(content=f" Error generating heatmap: {str(e)}")
         
         class HeatmapServerSelect(discord.ui.Select):
             def __init__(self):
@@ -1009,7 +973,7 @@ class Commands(commands.Cog):
             
             async def callback(self, sel_interaction: discord.Interaction):
                 if sel_interaction.user.id != interaction.user.id:
-                    await sel_interaction.response.send_message("You are not permitted to do this.", ephemeral=True)
+                    await sel_interaction.response.send_message("You are not permitted to do this.")
                     return
                 
                 await heatmap_callback(sel_interaction, int(self.values[0]))
@@ -1021,27 +985,46 @@ class Commands(commands.Cog):
         
         await interaction.response.send_message(
             "Select a server to generate heatmap for:",
-            view=HeatmapServerView(),
-            ephemeral=True
+            view=HeatmapServerView()
         )
 
     @app_commands.command(name="link", description="Links your account with DayZ Underworld bot")
     async def link_account(self, interaction:discord.Interaction, username:str):
-        if len(st.execute(f"SELECT * FROM stats WHERE dcid = ?", (interaction.user.id,)).fetchall()) >= 1:
+        conn = killfeed_database.get_connection()
+        cursor = conn.cursor()
+        
+        # Check if already linked
+        cursor.execute("SELECT * FROM stats WHERE dcid = ?", (interaction.user.id,))
+        if len(cursor.fetchall()) >= 1:
+            conn.close()
             await interaction.response.send_message("You are already linked to a username!")
-        elif len(st.execute(f"SELECT dcid FROM stats WHERE user = ?", (interaction.user.id,)).fetchall()) >= 1:
+            return
+        
+        # Check if username already linked
+        cursor.execute("SELECT dcid FROM stats WHERE dcid = ?", (interaction.user.id,))
+        if len(cursor.fetchall()) >= 1:
+            conn.close()
             await interaction.response.send_message("That username is already linked!")
-        elif st.execute(f"SELECT * FROM stats WHERE user = ? COLLATE NOCASE", (username,)).fetchall() == []:
+            return
+        
+        # Check if username exists
+        cursor.execute("SELECT * FROM stats WHERE user = ? COLLATE NOCASE", (username,))
+        if cursor.fetchall() == []:
+            conn.close()
             await interaction.response.send_message("That username is not yet in the database. If it is your first time joining the DayZ server, allow the bot 5-10 minutes to update the database")
-        else:
-            try:
-                username_from_database = st.execute(f"SELECT user FROM stats WHERE user = ? COLLATE NOCASE", (username,)).fetchone()[0]
-                st.execute("UPDATE stats SET dcid = ? WHERE user = ?", (interaction.user.id, username_from_database))
-                stats.commit()
-                await interaction.response.send_message(f"{username_from_database} is now linked to {interaction.user.mention}")
-            except Exception as e:
-                await interaction.response.send_message("Something went wrong, please open a ticket, or contact staff")
-                print(e)
+            return
+        
+        try:
+            cursor.execute("SELECT user FROM stats WHERE user = ? COLLATE NOCASE", (username,))
+            username_from_database = cursor.fetchone()[0]
+            cursor.execute("UPDATE stats SET dcid = ? WHERE user = ?", (interaction.user.id, username_from_database))
+            conn.commit()
+            conn.close()
+            await interaction.response.send_message(f"{username_from_database} is now linked to {interaction.user.mention}")
+        except Exception as e:
+            conn.close()
+            await interaction.response.send_message("Something went wrong, please open a ticket, or contact staff")
+            print(e)
 
     @app_commands.command(name="stats", description="View your own stats, or someone elses")
     async def stats(self, interaction:discord.Interaction, username:Union[str, None]=None):
@@ -1072,8 +1055,9 @@ class Commands(commands.Cog):
                 embed.add_field(name=i, value=value)
             return embed
         if username != None:
-            #COLLATE NOCASE
-            data_result = st.execute("""
+            conn = killfeed_database.get_connection()
+            cursor = conn.cursor()
+            cursor.execute("""
     SELECT p1.*,
            (SELECT COUNT(*) 
             FROM stats AS p2
@@ -1085,15 +1069,17 @@ class Commands(commands.Cog):
            ) + 1 AS DeathRank
     FROM stats AS p1
     WHERE p1.user = ? COLLATE NOCASE;
-""", (username,)).fetchall()
-            #print(data_from_database[0][9])
-            #print(data_from_database)
+""", (username,))
+            data_result = cursor.fetchall()
+            conn.close()
             if len(data_result) == 0:
                 await interaction.response.send_message(f"{username} does not exist in the database. Please check spelling.")
             else:
                 await interaction.response.send_message(embed=await gather_data(data_result[0]))
         elif username == None:
-            data_from_database = st.execute("""
+            conn = killfeed_database.get_connection()
+            cursor = conn.cursor()
+            cursor.execute("""
     SELECT p1.*,
            (SELECT COUNT(*) 
             FROM stats AS p2
@@ -1105,7 +1091,9 @@ class Commands(commands.Cog):
            ) + 1 AS DeathRank
     FROM stats AS p1
     WHERE p1.dcid = ? COLLATE NOCASE;
-""", (interaction.user.id,)).fetchall()
+""", (interaction.user.id,))
+            data_from_database = cursor.fetchall()
+            conn.close()
             print(data_from_database)
             if data_from_database == None or data_from_database == []:
                 await interaction.response.send_message("You did not specify a username, and you are not linked to an account, please use /link username, or specify a username!")
@@ -1114,26 +1102,40 @@ class Commands(commands.Cog):
         
     @app_commands.command(name="unlink", description="Unlinks your account with the bot")
     async def unlink(self, interaction:discord.Interaction):
-        username = st.execute(f"SELECT * FROM stats WHERE dcid = ?", (interaction.user.id,)).fetchall()
-        if len(st.execute(f"SELECT * FROM stats WHERE dcid = ?", (interaction.user.id,)).fetchall()) >= 1:
-            username = username[0][0]
-            st.execute("UPDATE stats SET dcid = ? WHERE user = ?", (None, username))
-            stats.commit()
+        conn = killfeed_database.get_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute("SELECT * FROM stats WHERE dcid = ?", (interaction.user.id,))
+        username_data = cursor.fetchall()
+        
+        if len(username_data) >= 1:
+            username = username_data[0][1]
+            cursor.execute("UPDATE stats SET dcid = ? WHERE user = ?", (None, username))
+            conn.commit()
+            conn.close()
             await interaction.response.send_message(f"{username} is now unlinked from {interaction.user.mention}")
         else:
+            conn.close()
             await interaction.response.send_message("You are not linked to an account!")
 
     @app_commands.checks.has_permissions(administrator=True)
     @app_commands.command(name="staffunlink", description="Forces an unlink")
     async def staffunlink(self, interaction:discord.Interaction, discord_user:Union[discord.Member]):
+        conn = killfeed_database.get_connection()
+        cursor = conn.cursor()
         dcid = discord_user.id
-        username = st.execute(f"SELECT * FROM stats WHERE dcid = ?", (dcid,)).fetchall()
-        if len(st.execute(f"SELECT * FROM stats WHERE dcid = ?", (dcid,)).fetchall()) >= 1:
-            username = username[0][0]
-            st.execute("UPDATE stats SET dcid = ? WHERE dcid = ?", (None, dcid))
-            stats.commit()
+        
+        cursor.execute("SELECT * FROM stats WHERE dcid = ?", (dcid,))
+        username_data = cursor.fetchall()
+        
+        if len(username_data) >= 1:
+            username = username_data[0][1]
+            cursor.execute("UPDATE stats SET dcid = ? WHERE dcid = ?", (None, dcid))
+            conn.commit()
+            conn.close()
             await interaction.response.send_message(f"{discord_user.mention} is now unlinked.")
         else:
+            conn.close()
             await interaction.response.send_message("That user is not linked!")
 
     @app_commands.checks.has_permissions(administrator=True)
