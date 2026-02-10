@@ -7,6 +7,7 @@ import sqlite3
 import time
 import logging
 from datetime import datetime
+from typing import Tuple
 import pytz
 import aiofiles
 
@@ -194,3 +195,136 @@ async def new_logfile(filepath: str) -> bool:
     except Exception as e:
         logger.error(f"Error checking logfile: {e}")
         return False
+
+
+def is_mam_device_event(line: str) -> bool:
+    """
+    Check if log line is a MAM device data event containing device ID and account UID.
+    Format: [MAM] :: [NetworkServer::CheckMAMData] :: device: ... | account: ... 
+    
+    Args:
+        line: Log line to check
+    
+    Returns:
+        Bool: True if this is a MAM device event
+    """
+    return "[MAM]" in line and "[NetworkServer::CheckMAMData]" in line and "device:" in line and "account:" in line
+
+
+def extract_device_id_and_uid(line: str) -> tuple:
+    """
+    Extract device ID and account UID from a MAM log line.
+    Format: [MAM] :: [NetworkServer::CheckMAMData] :: device: VUZwoETj2mkhZSZuUxOg5T8jwr0TrB4R_pt4klUoRio= | account: 383C4A0D1E702B6598B37338975EA3DB61DBC6D2 | time: 1077797
+    
+    Args:
+        line: MAM log line
+    
+    Returns:
+        Tuple: (device_id, uid) or (None, None) if extraction fails
+    """
+    try:
+        device_match = re.search(r'device:\s*([^\s|]+)', line)
+        account_match = re.search(r'account:\s*([^\s|]+)', line)
+        
+        device_id = device_match.group(1).strip() if device_match else None
+        uid = account_match.group(1).strip() if account_match else None
+        
+        logger.debug(f"Extracted device_id: {device_id}, uid: {uid}")
+        return device_id, uid
+    except Exception as e:
+        logger.error(f"Error extracting device ID and UID: {e}")
+        return None, None
+
+
+def extract_player_name_from_state_machine(line: str) -> str:
+    """
+    Extract player name from StateMachine log line.
+    Format: [StateMachine]: Player PlayerName (dpnid ... uid ...)
+    
+    Args:
+        line: StateMachine log line
+    
+    Returns:
+        String: Player name or empty string if not found
+    """
+    try:
+        match = re.search(r'\[StateMachine\]: Player\s+([^\s(]+)', line)
+        if match:
+            return match.group(1).strip()
+    except Exception as e:
+        logger.error(f"Error extracting player name from StateMachine: {e}")
+    
+    return ""
+
+
+def extract_uid_from_connection_event(line: str) -> str:
+    """
+    Extract UID from player connection event line.
+    Format: Player "PlayerName" (id=383C4A0D1E702B6598B37338975EA3DB61DBC6D2) has connected.
+    Or: Player PlayerName (id=383C4A0D1E702B6598B37338975EA3DB61DBC6D2) has connected.
+    
+    Args:
+        line: Connection event log line
+    
+    Returns:
+        String: UID or empty string if not found
+    """
+    try:
+        # Try to match with quoted name first
+        match = re.search(r'\(id=([A-F0-9]+)\)', line)
+        if match:
+            uid = match.group(1).strip()
+            player_match = re.search(r'Player\s+"?([^"()]+)"?\s*\(', line)
+            if player_match:
+                return uid
+    except Exception as e:
+        logger.error(f"Error extracting UID from connection event: {e}")
+    
+    return ""
+
+
+def get_player_from_connection_event(line: str) -> Tuple[str, str]:
+    """
+    Extract both player name and UID from connection event.
+    Format: Player Tylerj85 (id=383C4A0D1E702B6598B37338975EA3DB61DBC6D2) has connected.
+    
+    Returns:
+        Tuple: (player_name, uid) or ("", "") if not found
+    """
+    try:
+        # Extract UID from (id=...)
+        uid_match = re.search(r'\(id=([A-F0-9]+)\)', line)
+        uid = uid_match.group(1).strip() if uid_match else ""
+        
+        # Extract player name - matches "Player PlayerName (id="
+        player_match = re.search(r'Player\s+([^\s(]+)\s*\(id=', line)
+        player = player_match.group(1).strip() if player_match else ""
+        
+        return player, uid
+    except Exception as e:
+        logger.error(f"Error extracting player and UID from connection event: {e}")
+    
+    return "", ""
+
+
+def extract_uid_from_state_machine_event(line: str) -> Tuple[str, str]:
+    """
+    Extract player name and UID from StateMachine log line.
+    Format: [StateMachine]: Player Tylerj85 (dpnid 789427168 uid 383C4A0D1E702B6598B37338975EA3DB61DBC6D2) Entering ...
+    
+    Returns:
+        Tuple: (player_name, uid) or ("", "") if not found
+    """
+    try:
+        # Extract player name and uid from StateMachine line
+        # Format: [StateMachine]: Player PlayerName (dpnid ... uid UID) 
+        match = re.search(r'\[StateMachine\]: Player\s+([^\s(]+)\s+\(dpnid\s+\d+\s+uid\s+([A-F0-9]*)\)', line)
+        
+        if match:
+            player = match.group(1).strip()
+            uid = match.group(2).strip() if match.group(2) else ""
+            return player, uid
+    except Exception as e:
+        logger.error(f"Error extracting UID from StateMachine event: {e}")
+    
+    return "", ""

@@ -47,9 +47,21 @@ def initialize_master_db(db_path: str = KILLFEED_DB_PATH) -> Tuple[sqlite3.Conne
                 money INTEGER DEFAULT 0,
                 bounty INTEGER DEFAULT 0,
                 device_id TEXT DEFAULT NULL,
+                uid TEXT DEFAULT NULL,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        
+        # Add uid column if it doesn't exist (for existing databases)
+        cursor.execute("PRAGMA table_info(stats)")
+        columns = [col[1] for col in cursor.fetchall()]
+        if 'uid' not in columns:
+            try:
+                cursor.execute("ALTER TABLE stats ADD COLUMN uid TEXT DEFAULT NULL")
+                conn.commit()
+                logger.info("Added 'uid' column to stats table")
+            except sqlite3.OperationalError as e:
+                logger.debug(f"Column 'uid' already exists or operation failed: {e}")
         
         # Activity data series tables
         cursor.execute("""
@@ -231,7 +243,7 @@ def init_activity_series(series_name: str, initial_value: str = '', db_path: str
 
 def check_user_exists(cursor, player: str, stats_conn: sqlite3.Connection) -> None:
     """
-    Check if a player exists in stats table. Create entry if not.
+    Check if a player exists in stats table. Create entry if not (case-insensitive lookup).
     
     Args:
         cursor: Database cursor
@@ -239,7 +251,7 @@ def check_user_exists(cursor, player: str, stats_conn: sqlite3.Connection) -> No
         stats_conn: Database connection
     """
     try:
-        cursor.execute("SELECT * FROM stats WHERE user = ?", (player,))
+        cursor.execute("SELECT * FROM stats WHERE user = ? COLLATE NOCASE", (player,))
         result = cursor.fetchall()
         
         if not result or result == [()]:
@@ -257,7 +269,7 @@ def check_user_exists(cursor, player: str, stats_conn: sqlite3.Connection) -> No
 
 def update_kill_stats(cursor, killer: str, victim: str, stats_conn: sqlite3.Connection) -> None:
     """
-    Update kill and death statistics for a PvP kill.
+    Update kill and death statistics for a PvP kill (case-insensitive lookup).
     NOTE: Does NOT update alivetime on death - alivetime is only set when player first joins.
     
     Args:
@@ -268,11 +280,11 @@ def update_kill_stats(cursor, killer: str, victim: str, stats_conn: sqlite3.Conn
     """
     try:
         cursor.execute(
-            "UPDATE stats SET kills = kills + 1, killstreak = killstreak + 1, deathstreak = 0 WHERE user = ?",
+            "UPDATE stats SET kills = kills + 1, killstreak = killstreak + 1, deathstreak = 0 WHERE user = ? COLLATE NOCASE",
             (killer,)
         )
         cursor.execute(
-            "UPDATE stats SET deaths = deaths + 1, killstreak = 0, deathstreak = deathstreak + 1 WHERE user = ?",
+            "UPDATE stats SET deaths = deaths + 1, killstreak = 0, deathstreak = deathstreak + 1 WHERE user = ? COLLATE NOCASE",
             (victim,)
         )
         
@@ -284,7 +296,7 @@ def update_kill_stats(cursor, killer: str, victim: str, stats_conn: sqlite3.Conn
 
 def update_death_stats(cursor, victim: str, stats_conn: sqlite3.Connection) -> None:
     """
-    Update death statistics for a non-PvP death (suicide, bleed, zombie, etc).
+    Update death statistics for a non-PvP death (case-insensitive lookup).
     
     Args:
         cursor: Database cursor
@@ -293,7 +305,7 @@ def update_death_stats(cursor, victim: str, stats_conn: sqlite3.Connection) -> N
     """
     try:
         cursor.execute(
-            "UPDATE stats SET deaths = deaths + 1, killstreak = 0, deathstreak = deathstreak + 1 WHERE user = ?",
+            "UPDATE stats SET deaths = deaths + 1, killstreak = 0, deathstreak = deathstreak + 1 WHERE user = ? COLLATE NOCASE",
             (victim,)
         )
         
@@ -305,7 +317,7 @@ def update_death_stats(cursor, victim: str, stats_conn: sqlite3.Connection) -> N
 
 def get_player_stats(cursor, player: str) -> Dict[str, Any]:
     """
-    Retrieve player statistics.
+    Retrieve player statistics (case-insensitive lookup).
     
     Args:
         cursor: Database cursor
@@ -316,7 +328,7 @@ def get_player_stats(cursor, player: str) -> Dict[str, Any]:
     """
     try:
         result = cursor.execute(
-            "SELECT p1.*, (SELECT COUNT(*) FROM stats p2 WHERE p2.kills > p1.kills) as KillRank FROM stats p1 WHERE user = ?",
+            "SELECT p1.*, (SELECT COUNT(*) FROM stats p2 WHERE p2.kills > p1.kills) as KillRank FROM stats p1 WHERE user = ? COLLATE NOCASE",
             (player,)
         ).fetchall()
         
@@ -607,17 +619,115 @@ def unban_username(username: str, db_path: str = KILLFEED_DB_PATH) -> None:
 
 
 def get_device_id_from_stats(username: str, db_path: str = KILLFEED_DB_PATH) -> Optional[str]:
-    """Get device ID for a player."""
+    """Get device ID for a player (case-insensitive)."""
     try:
         conn = get_connection(db_path)
         cursor = conn.cursor()
-        cursor.execute("SELECT device_id FROM stats WHERE user = ?", (username,))
+        cursor.execute("SELECT device_id FROM stats WHERE user = ? COLLATE NOCASE", (username,))
         result = cursor.fetchone()
         conn.close()
         return result[0] if result else None
     except Exception as e:
         logger.error(f"Error getting device ID: {e}")
         return None
+
+
+def update_player_device_id(username: str, device_id: str, db_path: str = KILLFEED_DB_PATH) -> None:
+    """Update a player's device ID in the stats table (case-insensitive lookup)."""
+    try:
+        conn = get_connection(db_path)
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE stats SET device_id = ? WHERE user = ? COLLATE NOCASE",
+            (device_id, username)
+        )
+        conn.commit()
+        conn.close()
+        logger.debug(f"Updated device ID for {username}: {device_id}")
+    except Exception as e:
+        logger.error(f"Error updating device ID for {username}: {e}")
+
+
+def update_player_uid(username: str, uid: str, db_path: str = KILLFEED_DB_PATH) -> None:
+    """Update a player's UID in the stats table (case-insensitive lookup)."""
+    try:
+        conn = get_connection(db_path)
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE stats SET uid = ? WHERE user = ? COLLATE NOCASE",
+            (uid, username)
+        )
+        conn.commit()
+        conn.close()
+        logger.debug(f"Updated UID for {username}: {uid}")
+    except Exception as e:
+        logger.error(f"Error updating UID for {username}: {e}")
+
+
+def update_player_device_id_and_uid(username: str, device_id: str, uid: str, db_path: str = KILLFEED_DB_PATH) -> None:
+    """Update a player's device ID and UID in the stats table (case-insensitive lookup)."""
+    try:
+        conn = get_connection(db_path)
+        cursor = conn.cursor()
+        
+        # Check if player exists first (case-insensitive)
+        cursor.execute("SELECT user FROM stats WHERE user = ? COLLATE NOCASE", (username,))
+        result = cursor.fetchone()
+        
+        if not result:
+            logger.warning(f"Player {username} not found in stats table before update")
+            conn.close()
+            return
+        
+        cursor.execute(
+            "UPDATE stats SET device_id = ?, uid = ? WHERE user = ? COLLATE NOCASE",
+            (device_id, uid, username)
+        )
+        rows_affected = cursor.rowcount
+        conn.commit()
+        
+        if rows_affected > 0:
+            logger.info(f"Updated device ID and UID for {username} - Device: {device_id}, UID: {uid} ({rows_affected} row affected)")
+        else:
+            logger.warning(f"No rows updated for {username} - Device: {device_id}, UID: {uid}")
+        
+        # Verify the update (case-insensitive)
+        cursor.execute("SELECT device_id, uid FROM stats WHERE user = ? COLLATE NOCASE", (username,))
+        verify_result = cursor.fetchone()
+        if verify_result:
+            logger.debug(f"Verification - {username}: device_id={verify_result[0]}, uid={verify_result[1]}")
+        
+        conn.close()
+    except Exception as e:
+        logger.error(f"Error updating device ID and UID for {username}: {e}", exc_info=True)
+
+
+def get_player_uid(username: str, db_path: str = KILLFEED_DB_PATH) -> Optional[str]:
+    """Get UID for a player (case-insensitive)."""
+    try:
+        conn = get_connection(db_path)
+        cursor = conn.cursor()
+        cursor.execute("SELECT uid FROM stats WHERE user = ? COLLATE NOCASE", (username,))
+        result = cursor.fetchone()
+        conn.close()
+        return result[0] if result else None
+    except Exception as e:
+        logger.error(f"Error getting UID: {e}")
+        return None
+
+
+def get_all_users_by_device_id(device_id: str, db_path: str = KILLFEED_DB_PATH):
+    """Get all users with a specific device ID."""
+    try:
+        conn = get_connection(db_path)
+        cursor = conn.cursor()
+        cursor.execute("SELECT user FROM stats WHERE device_id = ?", (device_id,))
+        result = cursor.fetchall()
+        conn.close()
+        return [row[0] for row in result] if result else []
+    except Exception as e:
+        logger.error(f"Error getting users by device ID: {e}")
+        return []
 
 
 # Config/Template functions

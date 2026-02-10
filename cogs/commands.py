@@ -12,6 +12,8 @@ import logging
 import typing
 from typing import Union
 
+logger = logging.getLogger(__name__)
+
 #try:
 #    class KitSelectionMenu(discord.ui.Select):
 #        options = []
@@ -42,9 +44,15 @@ def get_all_banned_users():
 
 def unban_device_id(device_id):
     killfeed_database.unban_device_id(device_id)
+
+def get_all_users_by_device_id(device_id):
+    return killfeed_database.get_all_users_by_device_id(device_id)
+
+def get_user_uid(username):
+    return killfeed_database.get_player_uid(username)
     
 
-categories = ("Build", "Death", "Kill", "Hit", "Heatmap", "BaseInteraction", "OnlineCount", 'DeathCount', 'KillCount', "BanNotification", "Connect", "Disconnect")
+categories = ("Build", "Death", "Kill", "Hit", "Heatmap", "BaseInteraction", "OnlineCount", 'DeathCount', 'KillCount', "BanNotification", "Connect", "Disconnect", "AltAlert", "AltBanned")
 
 def updateDatabase(categories=categories):
     """Initialize config categories in the master database."""
@@ -243,53 +251,205 @@ class Commands(commands.Cog):
     #    pass
 
     @app_commands.checks.has_permissions(administrator=True)
-    @app_commands.command(name="bandevice", description="Bans the target Device ID")
+    @app_commands.command(name="bandevice", description="Bans the target Device ID and all associated accounts on all servers")
     async def bandevice(self, interaction: discord.Interaction, device_id: str = None, username: str = None):
-        if device_id:
-            if is_device_id_banned(device_id):
-                await interaction.response.send_message(f"Device ID {device_id} is already banned.")
-            else:
-                killfeed_database.insert_device_ban("Unknown", device_id)
-                await interaction.response.send_message(f"Successfully banned Device ID {device_id}.")
-        elif username:
-            device_id = get_device_id_from_stats(username)
-            if device_id:
-                if is_device_id_banned(device_id):
-                    await interaction.response.send_message(f"Device ID {device_id} associated with {username} is already banned.")
-                else:
-                    killfeed_database.insert_device_ban(username, device_id)
-                    await interaction.response.send_message(f"Successfully banned {username} (Device ID {device_id}).")
-            else:
-                await interaction.response.send_message(f"No device ID associated with {username}. Please provide the device ID manually.")
-        else:
+        if not device_id and not username:
             await interaction.response.send_message("Please provide either a device ID or a username.")
+            return
+        
+        # Defer the interaction as this will take a while
+        await interaction.response.defer()
+        
+        # Get device ID if username provided
+        if username and not device_id:
+            device_id = get_device_id_from_stats(username)
+            if not device_id:
+                await interaction.followup.send(f"No device ID associated with {username}. Please provide the device ID manually.")
+                return
+        
+        # Check if already banned
+        if is_device_id_banned(device_id):
+            await interaction.followup.send(f"Device ID {device_id} is already banned.")
+            return
+        
+        # Get all accounts using this device
+        all_accounts = get_all_users_by_device_id(device_id)
+        
+        if not all_accounts:
+            # If no accounts found, just mark it as banned in database
+            killfeed_database.insert_device_ban("Unknown", device_id)
+            await interaction.followup.send(f"No accounts found for Device ID {device_id}, but it has been marked as banned in the database.")
+            return
+        
+        # Get all servers
+        servers_list = killfeed_database.get_servers()
+        if not servers_list:
+            await interaction.followup.send("No servers configured. Cannot ban accounts.")
+            return
+        
+        # Ban all accounts on all servers
+        ban_results = []
+        for account in all_accounts:
+            for server in servers_list:
+                server_id = server[0]
+                try:
+                    # Create a choice object for the API
+                    class BanChoice:
+                        def __init__(self):
+                            self.name = 'Add'
+                    
+                    result = await Nitrado.banPlayer(server_id, account, BanChoice())
+                    ban_results.append(f"{account} on server {server_id}")
+                except Exception as e:
+                    logger.error(f"Error banning {account} on server {server_id}: {e}")
+                    ban_results.append(f"{account} on server {server_id} - {str(e)}")
+        
+        # Mark device as banned in database
+        killfeed_database.insert_device_ban(all_accounts[0], device_id)
+        
+        # Send results
+        result_text = "\n".join(ban_results)
+        embed = discord.Embed(
+            title="Device Ban Results",
+            description=f"Banned Device ID `{device_id}` ({len(all_accounts)} accounts on {len(servers_list)} servers)",
+            color=0xFF0000
+        )
+        embed.add_field(name="Accounts Banned", value=", ".join(all_accounts), inline=False)
+        embed.add_field(name="Ban Status", value=result_text[:1024], inline=False)
+        
+        await interaction.followup.send(embed=embed)
 
 
     @app_commands.checks.has_permissions(administrator=True)
-    @app_commands.command(name="unbandevice", description="Unbans the target Device ID")
+    @app_commands.command(name="unbandevice", description="Unbans the target Device ID and all associated accounts on all servers")
     async def unbandevice(self, interaction: discord.Interaction, device_id: str = None, username: str = None):
         if not device_id and not username:
             await interaction.response.send_message("Please provide either a device ID or a username to unban.")
             return
 
-        if device_id:
-            if not is_device_id_banned(device_id):
-                await interaction.response.send_message(f"Device ID {device_id} is not banned.")
-            else:
-                unban_device_id(device_id)
-                await interaction.response.send_message(f"Successfully unbanned Device ID {device_id} and removed all associated usernames.")
+        # Defer the interaction as this will take a while
+        await interaction.response.defer()
 
-        # Unban using username
-        elif username:
+        if username and not device_id:
             device_id = get_device_id_from_stats(username)
-            if device_id:
-                if not is_device_id_banned(device_id):
-                    await interaction.response.send_message(f"Device ID {device_id} associated with {username} is not banned.")
-                else:
-                    unban_device_id(device_id)
-                    await interaction.response.send_message(f"Successfully unbanned Device ID {device_id} and removed all associated usernames of {username}.")
-            else:
-                await interaction.response.send_message(f"No device ID associated with {username}.")
+            if not device_id:
+                await interaction.followup.send(f"No device ID associated with {username}.")
+                return
+
+        if not is_device_id_banned(device_id):
+            await interaction.followup.send(f"Device ID {device_id} is not banned.")
+            return
+
+        # Get all accounts using this device
+        all_accounts = get_all_users_by_device_id(device_id)
+        
+        if not all_accounts:
+            # If no accounts found, just unban in database
+            unban_device_id(device_id)
+            await interaction.followup.send(f"Device ID {device_id} has been unbanned in the database (no accounts found).")
+            return
+        
+        # Get all servers
+        servers_list = killfeed_database.get_servers()
+        if not servers_list:
+            await interaction.followup.send("No servers configured. Cannot unban accounts.")
+            return
+        
+        # Unban all accounts on all servers
+        unban_results = []
+        for account in all_accounts:
+            for server in servers_list:
+                server_id = server[0]
+                try:
+                    # Create a choice object for the API
+                    class UnbanChoice:
+                        def __init__(self):
+                            self.name = 'Remove'
+                    
+                    result = await Nitrado.banPlayer(server_id, account, UnbanChoice())
+                    unban_results.append(f" {account} on server {server_id}")
+                except Exception as e:
+                    logger.error(f"Error unbanning {account} on server {server_id}: {e}")
+                    unban_results.append(f"{account} on server {server_id} - {str(e)}")
+        
+        # Unban device in database
+        unban_device_id(device_id)
+        
+        # Send results
+        result_text = "\n".join(unban_results)
+        embed = discord.Embed(
+            title="Device Unban Results",
+            description=f"Unbanned Device ID `{device_id}` ({len(all_accounts)} accounts on {len(servers_list)} servers)",
+            color=0x00FF00
+        )
+        embed.add_field(name="Accounts Unbanned", value=", ".join(all_accounts), inline=False)
+        embed.add_field(name="Unban Status", value=result_text[:1024], inline=False)
+        
+        await interaction.followup.send(embed=embed)
+
+    @app_commands.checks.has_permissions(administrator=True)
+    @app_commands.command(name="querydevice", description="Query a player's device ID and all accounts on that device")
+    async def querydevice(self, interaction: discord.Interaction, username: str):
+        """Query device ID and connected accounts for a player."""
+        device_id = get_device_id_from_stats(username)
+        uid = get_user_uid(username)
+        
+        if not device_id:
+            await interaction.response.send_message(f"No device ID found for player **{username}**. Player may not have connected yet or uses a different device.", ephemeral=True)
+            return
+        
+        # Get all accounts using this device
+        alt_accounts = get_all_users_by_device_id(device_id)
+        is_banned = is_device_id_banned(device_id)
+        
+        embed = discord.Embed(
+            title=f"Alt Account Investigation: {username}",
+            color=0xFF0000 if is_banned else 0x0099FF,
+            description="Staff-only device tracking information"
+        )
+        
+        embed.add_field(name="Primary Account", value=f"**{username}**", inline=False)
+        embed.add_field(name="Device ID", value=f"`{device_id}`", inline=False)
+        if uid:
+            embed.add_field(name="Account UID", value=f"`{uid}`", inline=False)
+        
+        embed.add_field(name="Ban Status", value="**BANNED DEVICE**" if is_banned else "Not Banned", inline=False)
+        
+        if alt_accounts and len(alt_accounts) > 1:
+            alt_list = "\n".join([f"• **{account}**" if account != username else f"• **{account}** (PRIMARY)" for account in alt_accounts])
+            embed.add_field(name=f"Linked Accounts ({len(alt_accounts)} total)", value=alt_list, inline=False)
+        elif len(alt_accounts) == 1:
+            embed.add_field(name="Linked Accounts", value=f"Only **{username}** uses this device", inline=False)
+        else:
+            embed.add_field(name="Linked Accounts", value="No accounts found", inline=False)
+        
+        embed.set_footer(text="Staff Only - Alt Account Detection System")
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+    
+    @app_commands.checks.has_permissions(administrator=True)
+    @app_commands.command(name="queryalts", description="Find all accounts on a specific device ID")
+    async def queryalts(self, interaction: discord.Interaction, device_id: str):
+        """Find all player accounts connected to a device ID."""
+        accounts = get_all_users_by_device_id(device_id)
+        is_banned = is_device_id_banned(device_id)
+        
+        embed = discord.Embed(
+            title="Device Alt Accounts Query",
+            color=0xFF0000 if is_banned else 0x0099FF,
+            description="Staff-only device tracking information"
+        )
+        
+        embed.add_field(name="Device ID", value=f"`{device_id}`", inline=False)
+        embed.add_field(name="Ban Status", value="**BANNED DEVICE**" if is_banned else "Not Banned", inline=False)
+        
+        if accounts:
+            account_list = "\n".join([f"• **{account}**" for account in accounts])
+            embed.add_field(name=f"Associated Accounts ({len(accounts)})", value=account_list, inline=False)
+        else:
+            embed.add_field(name="Associated Accounts", value="No accounts found in database", inline=False)
+        
+        embed.set_footer(text="🔐 Staff Only - Alt Account Detection System")
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
 # Create a command to show all banned users with pagination
     @app_commands.command(name="viewbans", description="View all banned users and their device IDs.")
@@ -354,6 +514,93 @@ class Commands(commands.Cog):
             except asyncio.TimeoutError:
                 await message.clear_reactions()
                 break
+
+    @app_commands.command(name="querydevice", description="Query a player's device ID")
+    async def querydevice(self, interaction: discord.Interaction, username: str):
+        """Get device ID and UID for a player."""
+        try:
+            device_id = get_device_id_from_stats(username)
+            uid = killfeed_database.get_player_uid(username)
+            
+            if device_id or uid:
+                embed = discord.Embed(
+                    title="Device Information",
+                    description=f"**Player**: {username}",
+                    color=0x0099FF
+                )
+                
+                if device_id:
+                    embed.add_field(name="Device ID", value=f"`{device_id}`", inline=True)
+                else:
+                    embed.add_field(name="Device ID", value="Not recorded", inline=True)
+                
+                if uid:
+                    embed.add_field(name="UID", value=f"`{uid}`", inline=True)
+                else:
+                    embed.add_field(name="UID", value="Not recorded", inline=True)
+                
+                # Check if device is banned
+                if device_id and is_device_id_banned(device_id):
+                    embed.add_field(name="Status", value="**BANNED**", inline=False)
+                    embed.color = 0xFF0000
+                
+                # Get all alts on this device
+                if device_id:
+                    alts = killfeed_database.get_all_users_by_device_id(device_id)
+                    if alts:
+                        alt_count = len(alts)
+                        alt_text = f"Found {alt_count} accounts on this device:\n"
+                        alt_text += "\n".join([f"• `{alt}`" for alt in alts[:10]])
+                        if alt_count > 10:
+                            alt_text += f"\n... and {alt_count - 10} more"
+                        embed.add_field(name="Accounts on This Device", value=alt_text, inline=False)
+                
+                await interaction.response.send_message(embed=embed)
+            else:
+                await interaction.response.send_message(f"No device information found for player `{username}`.")
+        except Exception as e:
+            await interaction.response.send_message(f"Error querying device: {e}")
+            logger.error(f"Error in querydevice command: {e}")
+
+    @app_commands.command(name="queryalts", description="Find all accounts using a specific device ID")
+    async def queryalts(self, interaction: discord.Interaction, device_id: str):
+        """Find all accounts using a specific device ID."""
+        try:
+            alts = killfeed_database.get_all_users_by_device_id(device_id)
+            
+            if alts:
+                embed = discord.Embed(
+                    title="Alt Account Detection",
+                    description=f"**Device ID**: `{device_id}`",
+                    color=0xFFA500
+                )
+                
+                # Check if device is banned
+                is_banned = is_device_id_banned(device_id)
+                if is_banned:
+                    embed.color = 0xFF0000
+                    embed.add_field(name="Status", value="**BANNED**", inline=False)
+                
+                alt_count = len(alts)
+                embed.add_field(name="Account Count", value=str(alt_count), inline=True)
+                
+                # List accounts
+                accounts_text = ""
+                for i, alt in enumerate(alts[:20], 1):
+                    accounts_text += f"{i}. `{alt}`\n"
+                
+                if alt_count > 20:
+                    accounts_text += f"... and {alt_count - 20} more"
+                
+                embed.add_field(name="Accounts", value=accounts_text, inline=False)
+                embed.set_footer(text=f"Total accounts: {alt_count}")
+                
+                await interaction.response.send_message(embed=embed)
+            else:
+                await interaction.response.send_message(f"No accounts found using device ID `{device_id}`.")
+        except Exception as e:
+            await interaction.response.send_message(f"Error querying alts: {e}")
+            logger.error(f"Error in queryalts command: {e}")
 
     @app_commands.checks.has_permissions(administrator=True)
     @app_commands.command(name="terminatebatch", description="Deletes most recent generated keys")
@@ -483,7 +730,7 @@ class Commands(commands.Cog):
                                             cursor.execute("UPDATE codes SET redeemed = ?, user = ? WHERE code = ?", (0, str(modal_self.username), str(modal_self.code)))
                                             conn.commit()
                                             conn.close()
-                                            await modal_interaction.response.send_message(f"✓ Redeemed {query[0][2]} for {modal_self.username} on server {selected_server_id}")  # data column is at index 2
+                                            await modal_interaction.response.send_message(f" Redeemed {query[0][2]} for {modal_self.username} on server {selected_server_id}")  # data column is at index 2
                                         else:
                                             conn.close()
                                             await modal_interaction.response.send_message(data)
@@ -1029,36 +1276,51 @@ class Commands(commands.Cog):
     @app_commands.command(name="stats", description="View your own stats, or someone elses")
     async def stats(self, interaction:discord.Interaction, username:Union[str, None]=None):
         async def gather_data(data_from_database):
-            temp_keys = ['user', 'kills', 'deaths', 'alive since', 'death streak', 'kill streak', 'discord ID', 'money', 'bounty']
-            temp_keys = [i.title() for i in temp_keys]
-            result_dict = dict.fromkeys(temp_keys)
-            remove_from_dict = []
-            #print("Generating stats")
-            for key, value in zip(result_dict.keys(), data_from_database):
-                #print(key)
-                if key == 'Alive Since':
-                    value = f'<t:{value}>'
-                if key == 'Kills':
-                    value = str(value) + f' (Ranked #{str(data_from_database[-2])})'
-                if key == 'Deaths':
-                    value = str(value) + f' (Ranked #{str(data_from_database[-1])})'
-                if key == 'Discord Id':
-                    if value == 0 or value == None:
-                        remove_from_dict.append(key)
-                if value != None:
-                    result_dict[key] = value
-            for i in remove_from_dict:
-                del result_dict[i]
-            embed = discord.Embed(title=f'{data_from_database[0]}\'s Stats', description=f'Stats as of <t:{int(datetime.datetime.now().timestamp())}>', color=0xE40000)
-            for i in result_dict:
-                value = result_dict.get(i)
-                embed.add_field(name=i, value=value)
+            # data_from_database structure: (id, user, kills, deaths, alivetime, deathstreak, killstreak, dcid, money, bounty, created_at, KillRank, DeathRank)
+            result_dict = {}
+            
+            # Extract values from database tuple
+            db_id = data_from_database[0]
+            username = data_from_database[1]
+            kills = data_from_database[2]
+            deaths = data_from_database[3]
+            alivetime = data_from_database[4]
+            deathstreak = data_from_database[5]
+            killstreak = data_from_database[6]
+            dcid = data_from_database[7]
+            money = data_from_database[8]
+            bounty = data_from_database[9]
+            created_at = data_from_database[10]
+            kill_rank = data_from_database[11] 
+            death_rank = data_from_database[12]
+            
+            # Parse created_at datetime string to Unix timestamp
+            created_at_dt = datetime.datetime.strptime(created_at, '%Y-%m-%d %H:%M:%S')
+            created_at_timestamp = int(created_at_dt.timestamp())
+            
+            # Build result dictionary with proper values
+            result_dict['User'] = username
+            result_dict['Kills'] = f'{kills} (Ranked #{kill_rank})'
+            result_dict['Deaths'] = f'{deaths} (Ranked #{death_rank})'
+            result_dict['Alive Since'] = f'<t:{created_at_timestamp}>'
+            result_dict['Death Streak'] = str(deathstreak)
+            result_dict['Kill Streak'] = str(killstreak)
+            result_dict['Money'] = str(money)
+            result_dict['Bounty'] = str(bounty)
+            
+            # Only include Discord ID if it's set
+            if dcid and dcid != 0:
+                result_dict['Discord ID'] = str(dcid)
+            
+            embed = discord.Embed(title=f'{username}\'s Stats', description=f'Stats as of <t:{int(datetime.datetime.now().timestamp())}>', color=0xE40000)
+            for key, value in result_dict.items():
+                embed.add_field(name=key, value=value)
             return embed
         if username != None:
             conn = killfeed_database.get_connection()
             cursor = conn.cursor()
             cursor.execute("""
-    SELECT p1.*,
+    SELECT p1.id, p1.user, p1.kills, p1.deaths, p1.alivetime, p1.deathstreak, p1.killstreak, p1.dcid, p1.money, p1.bounty, p1.created_at,
            (SELECT COUNT(*) 
             FROM stats AS p2
             WHERE p2.kills > p1.kills
@@ -1080,7 +1342,7 @@ class Commands(commands.Cog):
             conn = killfeed_database.get_connection()
             cursor = conn.cursor()
             cursor.execute("""
-    SELECT p1.*,
+    SELECT p1.id, p1.user, p1.kills, p1.deaths, p1.alivetime, p1.deathstreak, p1.killstreak, p1.dcid, p1.money, p1.bounty, p1.created_at,
            (SELECT COUNT(*) 
             FROM stats AS p2
             WHERE p2.kills > p1.kills

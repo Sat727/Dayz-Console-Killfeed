@@ -6,6 +6,7 @@ from utils.Weapons import Weapons as Weapons
 from utils.closestLoc import getClosestLocation
 from utils.heatmap import generate_heatmap
 from utils import killfeed_helpers, killfeed_database, killfeed_events, killfeed_nitrado
+from utils.nitradoFuncs import NitradoFunctions
 import sys, os, time, sqlite3, re, discord, logging, asyncio, aiofiles
 import aiohttp
 
@@ -13,7 +14,8 @@ import aiohttp
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Initialize database connections
+# Initialize Nitrado functions
+Nitrado = NitradoFunctions()# Initialize database connections
 killfeed_database.initialize_master_db()
 conn, st = killfeed_database.initialize_stats_db()
 killfeed_database.initialize_activity_db()
@@ -31,6 +33,8 @@ class Killfeed(commands.Cog):
         self.testing = False
         self.last_updated_server = None
         self.task_started = False  # Flag to prevent duplicate task starts
+        self.uid_to_player = {}  # Track UID to player name mapping for alt detection
+        self.processed_rpt_entries = {}  # Track processed RPT entries per server to avoid duplicates
 
     async def safe_edit_channel(self, channel, **kwargs):
         try:
@@ -79,12 +83,17 @@ class Killfeed(commands.Cog):
 
             if not self.testing:
                 log_acquired = await killfeed_nitrado.fetch_server_log(server_id, self.server_maps)
+                # Also fetch RPT log for device ID tracking (alt detection)
+                rpt_acquired = await killfeed_nitrado.fetch_server_rpt_log(server_id)
             else:
                 log_acquired = True
+                rpt_acquired = True
 
             if log_acquired:
                 server_map = self.server_maps.get(server_id, "chernarus").lower()
-                tasks_to_run.append(self.check_server_log(server_id, channel_map, server_map))
+                # Process RPT for device IDs first, then process ADM log
+                alt_accounts, banned_devices = await self.process_rpt_log_for_device_ids(server_id)
+                tasks_to_run.append(self.check_server_log(server_id, channel_map, server_map, alt_accounts, banned_devices))
 
         await asyncio.gather(*tasks_to_run)
 
@@ -101,7 +110,135 @@ class Killfeed(commands.Cog):
         await self.bot.wait_until_ready()
         logger.info("Fetch logs task started - running every 5 minutes")
 
-    async def check_server_log(self, server_id: int, db_config, server_map: str = "chernarus"):
+    async def process_rpt_log_for_device_ids(self, server_id: int):
+        """
+        Process RPT log file to extract device IDs and UIDs for alt account detection.
+        Also auto-bans players on banned devices.
+        
+        Args:
+            server_id: The server ID
+        
+        Returns:
+            tuple: (alt_accounts_list, banned_device_list) where:
+                - alt_accounts_list: list of dicts with 'player', 'device_id', 'alts' (other accounts on same device)
+                - banned_device_list: list of dicts with 'player', 'device_id', 'alts'
+        """
+        rpt_file_path = path.abspath(path.join(path.dirname(__file__), "..", "files", f"{server_id}.RPT"))
+        
+        if not os.path.exists(rpt_file_path):
+            logger.debug(f"[{server_id}] RPT file not found at {rpt_file_path}")
+            return [], []
+        
+        logger.info(f"[{server_id}] Processing RPT log for device IDs: {rpt_file_path}")
+        
+        alt_accounts = []
+        banned_devices = []
+        
+        # Initialize per-server tracking if needed
+        if server_id not in self.processed_rpt_entries:
+            self.processed_rpt_entries[server_id] = set()
+        
+        try:
+            # Get database connections
+            conn = killfeed_database.get_connection()
+            cursor = conn.cursor()
+            
+            async with aiofiles.open(rpt_file_path, "r") as file:
+                async for raw_line in file:
+                    line = raw_line.strip()
+                    
+                    if not line:
+                        continue
+                    
+                    # Check for StateMachine events to map UID to player name
+                    if "[StateMachine]:" in line and "Player" in line:
+                        player_name, uid = killfeed_helpers.extract_uid_from_state_machine_event(line)
+                        if player_name and uid:
+                            self.uid_to_player[uid] = player_name
+                            # Ensure player exists in stats table
+                            killfeed_database.check_user_exists(cursor, player_name, conn)
+                            logger.debug(f"[{server_id}] Mapped UID {uid} to player {player_name}")
+                    
+                    # Check for MAM device events to get device ID and link to player
+                    elif killfeed_helpers.is_mam_device_event(line):
+                        device_id, uid = killfeed_helpers.extract_device_id_and_uid(line)
+                        if device_id and uid:
+                            # Create a unique key for this device+uid combination
+                            entry_key = f"{device_id}:{uid}"
+                            
+                            # Skip if we've already processed this entry
+                            if entry_key in self.processed_rpt_entries[server_id]:
+                                logger.debug(f"[{server_id}] Skipping already-processed entry: {entry_key}")
+                                continue
+                            
+                            # Mark this entry as processed
+                            self.processed_rpt_entries[server_id].add(entry_key)
+                            
+                            # Find player name from UID mapping
+                            player_name = self.uid_to_player.get(uid)
+                            
+                            if player_name:
+                                # Ensure player exists in stats table before updating
+                                killfeed_database.check_user_exists(cursor, player_name, conn)
+                                
+                                # Update player with device ID and UID using existing connection
+                                cursor.execute(
+                                    "UPDATE stats SET device_id = ?, uid = ? WHERE user = ?",
+                                    (device_id, uid, player_name)
+                                )
+                                rows_affected = cursor.rowcount
+                                conn.commit()
+                                
+                                if rows_affected > 0:
+                                    logger.info(f"[{server_id}] Alt Detection: {player_name} (UID: {uid}) - Device: {device_id} ({rows_affected} row updated)")
+                                else:
+                                    logger.warning(f"[{server_id}] Failed to update device ID for {player_name} - no rows affected")
+                                
+                                # Verify the update
+                                cursor.execute("SELECT device_id, uid FROM stats WHERE user = ?", (player_name,))
+                                verify_result = cursor.fetchone()
+                                if verify_result and verify_result[0]:
+                                    logger.debug(f"[{server_id}] Verified - {player_name}: device_id={verify_result[0]}, uid={verify_result[1]}")
+                                else:
+                                    logger.warning(f"[{server_id}] Verification failed - {player_name} device_id still not set")
+                                
+                                # Get all accounts on this device
+                                all_accounts_on_device = killfeed_database.get_all_users_by_device_id(device_id)
+                                other_alts = [acc for acc in all_accounts_on_device if acc != player_name]
+                                
+                                # Check if device is banned
+                                if killfeed_database.is_device_id_banned(device_id):
+                                    logger.warning(f"[{server_id}] BANNED DEVICE DETECTED: {player_name} (Device: {device_id})")
+                                    banned_devices.append({
+                                        'player': player_name,
+                                        'device_id': device_id,
+                                        'alts': other_alts
+                                    })
+                                else:
+                                    # Track as alt account if there are other accounts on this device
+                                    if other_alts:
+                                        alt_accounts.append({
+                                            'player': player_name,
+                                            'device_id': device_id,
+                                            'alts': other_alts
+                                        })
+                            else:
+                                logger.debug(f"[{server_id}] UID {uid} not found in mapping yet")
+            
+            conn.close()
+            logger.info(f"[{server_id}] RPT log processing complete")
+        
+        except Exception as e:
+            logger.error(f"[{server_id}] Error processing RPT log: {e}", exc_info=True)
+        
+        return alt_accounts, banned_devices
+
+    async def check_server_log(self, server_id: int, db_config, server_map: str = "chernarus", alt_accounts: list = None, banned_devices: list = None):
+        
+        if alt_accounts is None:
+            alt_accounts = []
+        if banned_devices is None:
+            banned_devices = []
 
         # Get map URL and location capability
         dayz = killfeed_nitrado.get_map_url(server_map)
@@ -129,7 +266,75 @@ class Killfeed(commands.Cog):
             "ban_notify": self.bot.get_channel(db_config.get("BanNotification")) if db_config.get("BanNotification") else None,
             "connect": self.bot.get_channel(db_config.get("Connect")) if db_config.get("Connect") else None,
             "disconnect": self.bot.get_channel(db_config.get("Disconnect")) if db_config.get("Disconnect") else None,
+            "alt_alert": self.bot.get_channel(db_config.get("AltAlert")) if db_config.get("AltAlert") else None,
+            "alt_banned": self.bot.get_channel(db_config.get("AltBanned")) if db_config.get("AltBanned") else None,
         }
+        
+        # Handle banned device auto-bans and alerts
+        if banned_devices:
+            for banned_info in banned_devices:
+                player_name = banned_info['player']
+                device_id = banned_info['device_id']
+                alts = banned_info['alts']
+                
+                # Auto-ban only the account that is currently detected (not all alts)
+                try:
+                    class BanChoice:
+                        name = 'Add'
+                    
+                    result = await Nitrado.banPlayer(server_id, player_name, BanChoice())
+                    logger.info(f"[{server_id}] Auto-banned {player_name} on Nitrado (Banned Device: {device_id})")
+                except Exception as e:
+                    logger.error(f"[{server_id}] Error auto-banning {player_name}: {e}")
+                
+                # Send alert to alt_banned channel
+                if channel_map.get("alt_banned"):
+                    embed = discord.Embed(
+                        title="Banned Device Detected & Auto-Banned",
+                        color=0xFF0000
+                    )
+                    embed.add_field(name="Account", value=f"**{player_name}**", inline=False)
+                    embed.add_field(name="Device ID", value=f"`{device_id}`", inline=False)
+                    
+                    if alts:
+                        alt_text = "\n".join([f"• {alt}" for alt in alts])
+                        embed.add_field(name=f"Other Accounts on Device ({len(alts)})", value=alt_text, inline=False)
+                    
+                    embed.add_field(name="Action", value="Account auto-banned on server", inline=False)
+                    embed.set_footer(text=f"Server: {server_id}")
+                    
+                    try:
+                        await channel_map["alt_banned"].send(embed=embed)
+                    except Exception as e:
+                        logger.error(f"[{server_id}] Error sending alt_banned alert: {e}")
+        
+        # Handle alt account alerts (non-banned)
+        if alt_accounts:
+            for alt_info in alt_accounts:
+                player_name = alt_info['player']
+                device_id = alt_info['device_id']
+                alts = alt_info['alts']
+                
+                # Send alert to alt_alert channel
+                if channel_map.get("alt_alert"):
+                    embed = discord.Embed(
+                        title="🔍 Alt Account Detected",
+                        color=0xFFA500
+                    )
+                    embed.add_field(name="Account", value=f"**{player_name}**", inline=False)
+                    embed.add_field(name="Device ID", value=f"`{device_id}`", inline=False)
+                    
+                    if alts:
+                        alt_text = "\n".join([f"• {alt}" for alt in alts])
+                        embed.add_field(name=f"Other Accounts on Device ({len(alts)})", value=alt_text, inline=False)
+                    
+                    embed.set_footer(text=f"Server: {server_id}")
+                    
+                    try:
+                        await channel_map["alt_alert"].send(embed=embed)
+                    except Exception as e:
+                        logger.error(f"[{server_id}] Error sending alt_alert: {e}")
+
 
         if server_id not in self.reported:
             self.reported[server_id] = []
@@ -204,16 +409,30 @@ class Killfeed(commands.Cog):
 
                 # Handle different event types
                 try:
+                    # Check for StateMachine events first to capture UID-to-player mappings (for ADM processing)
+                    if "[StateMachine]:" in line and "Player" in line:
+                        player_name, uid = killfeed_helpers.extract_uid_from_state_machine_event(line)
+                        if player_name and uid:
+                            # Store the UID to player mapping for later reference
+                            self.uid_to_player[uid] = player_name
+                            logger.debug(f"Mapped UID {uid} to player {player_name} from ADM StateMachine")
+                    
                     # Check connection/disconnection events first (no "(DEAD)" check)
                     if killfeed_events.is_player_connected_event(line):
                         timestamp = killfeed_helpers.extract_timestamp(line)
                         timestamp_str = await killfeed_helpers.time_func(timestamp)
                         player = killfeed_helpers.extract_player_name(line)
                         if player:
+                            # Extract UID from connection event and store mapping
+                            player_name, uid = killfeed_helpers.get_player_from_connection_event(line)
+                            if player_name and uid:
+                                self.uid_to_player[uid] = player_name
+                                logger.debug(f"Mapped UID {uid} to player {player_name} from connection event")
+                            
                             # Initialize player stats on connect
                             killfeed_database.check_user_exists(st, player, stats)
                             embed = await killfeed_events.create_player_connected_embed(player, timestamp_str)
-                            if channel_map.get("connect"):
+                            if channel_map.get("connect") and not self.FirstTime:
                                 await channel_map["connect"].send(embed=embed)
 
                     elif killfeed_events.is_player_disconnected_event(line):
@@ -222,7 +441,7 @@ class Killfeed(commands.Cog):
                         player = killfeed_helpers.extract_player_name(line)
                         if player:
                             embed = await killfeed_events.create_player_disconnected_embed(player, timestamp_str)
-                            if channel_map.get("disconnect"):
+                            if channel_map.get("disconnect") and not self.FirstTime:
                                 await channel_map["disconnect"].send(embed=embed)
 
                     # Check specific death types BEFORE generic "(DEAD)" check
@@ -242,7 +461,7 @@ class Killfeed(commands.Cog):
                             logger.info(f"Suicide death recorded: {player_killed}")
                         
                         embed = await killfeed_events.create_suicide_embed(player_killed, timestamp_str)
-                        if channel_map["death"]:
+                        if channel_map["death"] and not self.FirstTime:
                             await channel_map["death"].send(embed=embed)
 
                     elif killfeed_events.is_explosion_event(line):
@@ -263,7 +482,7 @@ class Killfeed(commands.Cog):
                         
                         explosion_type = killfeed_events.extract_explosion_type(line)
                         embed = await killfeed_events.create_explosion_embed(player_killed, explosion_type, timestamp_str)
-                        if channel_map["kill"]:
+                        if channel_map["kill"] and not self.FirstTime:
                             await channel_map["kill"].send(embed=embed)
 
                     elif killfeed_events.is_bleed_out_event(line):
@@ -282,7 +501,7 @@ class Killfeed(commands.Cog):
                             logger.info(f"Bleed out death recorded: {victim}")
                         
                         embed = await killfeed_events.create_bleed_out_embed(victim, timestamp_str)
-                        if channel_map["death"]:
+                        if channel_map["death"] and not self.FirstTime:
                             await channel_map["death"].send(embed=embed)
 
                     elif killfeed_events.is_wolf_kill_event(line):
@@ -301,7 +520,7 @@ class Killfeed(commands.Cog):
                             logger.info(f"Wolf kill death recorded: {victim}")
                         
                         embed = await killfeed_events.create_wolf_kill_embed(victim, timestamp_str)
-                        if channel_map["death"]:
+                        if channel_map["death"] and not self.FirstTime:
                             await channel_map["death"].send(embed=embed)
 
                     elif killfeed_events.is_bear_kill_event(line):
@@ -320,7 +539,7 @@ class Killfeed(commands.Cog):
                             logger.info(f"Bear kill death recorded: {victim}")
                         
                         embed = await killfeed_events.create_bear_kill_embed(victim, timestamp_str)
-                        if channel_map["death"]:
+                        if channel_map["death"] and not self.FirstTime:
                             await channel_map["death"].send(embed=embed)
 
                     elif killfeed_events.is_fall_death_event(line):
@@ -339,7 +558,7 @@ class Killfeed(commands.Cog):
                             logger.info(f"Fall death recorded: {victim}")
                         
                         embed = await killfeed_events.create_fall_death_embed(victim, timestamp_str)
-                        if channel_map["death"]:
+                        if channel_map["death"] and not self.FirstTime:
                             await channel_map["death"].send(embed=embed)
 
                     # Check PvP kills
@@ -423,7 +642,7 @@ class Killfeed(commands.Cog):
                                     f"**[Killer]({dayz + killer_coords}) - [Victim]({dayz + victim_coords})**"
                                 )
 
-                            if channel_map["kill"]:
+                            if channel_map["kill"] and not self.FirstTime:
                                 await channel_map["kill"].send(embed=embed)
 
                         except Exception as e:
@@ -437,7 +656,7 @@ class Killfeed(commands.Cog):
                         timestamp_str = await killfeed_helpers.time_func(timestamp)
                         victim = killfeed_helpers.extract_player_name(line)
                         embed = await killfeed_events.create_generic_death_embed(victim, timestamp_str)
-                        if channel_map["death"]:
+                        if channel_map["death"] and not self.FirstTime:
                             await channel_map["death"].send(embed=embed)
 
                 except Exception as e:
@@ -454,8 +673,8 @@ class Killfeed(commands.Cog):
         killfeed_database.update_series('deathdata', counter_deaths)
         killfeed_database.update_series('data', counter_activity)
 
-        # Update Discord channel stats (only if there was new activity)
-        if counter_kills > 0 or counter_deaths > 0:
+        # Update Discord channel stats (only if there was new activity and not first time)
+        if (counter_kills > 0 or counter_deaths > 0) and not self.FirstTime:
             try:
                 total_deaths = killfeed_database.get_total_deaths()
                 total_kills = killfeed_database.get_total_kills()
@@ -495,9 +714,9 @@ class Killfeed(commands.Cog):
                     description=f"Entries: {len(unique_locations)}\n<t:{int(time.mktime(datetime.now().timetuple()))}:R>",
                     color=0xE40000
                 ).set_image(url="attachment://heatmap.jpg")
-                if channel_map["heatmap"]:
+                if channel_map["heatmap"] and not self.FirstTime:
                     await channel_map["heatmap"].send(embed=heatmap_embed, file=discord.File("heatmap.jpg"))
-                logger.info(f"[{server_id}] Heatmap sent with {len(unique_locations)} location entries")
+                    logger.info(f"[{server_id}] Heatmap sent with {len(unique_locations)} location entries")
             except asyncio.TimeoutError:
                 logger.warning(f"[{server_id}] Discord API timeout when sending heatmap")
             except Exception as e:
