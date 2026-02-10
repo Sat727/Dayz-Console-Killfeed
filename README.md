@@ -58,9 +58,9 @@ Classic prefix command available for sync:
 
 ---
 
-## 🐍 Installing Python 3.10 (Windows)
+## 🐍 Installing Python
 
-Before running the bot, you’ll need **Python 3.10** (not 3.11+).
+Before running the bot, you’ll need 3.10+
 
 ### 1. Download Python 3.10
 - Visit the official page: [https://www.python.org/downloads/release/python-3100/](https://www.python.org/downloads/release/python-3100/)
@@ -98,8 +98,8 @@ Once Python and pip are installed, continue to the **Setup Guide** below.
 
 1. Clone the repository:
    ```bash
-   git clone https://github.com/yourusername/dayz-bot.git
-   cd dayz-bot
+   git clone https://github.com/Sat727/Dayz-Console-Killfeed
+   cd Dayz-Console-Killfeed
    ```
 
 2. Edit `config.py` with your Nitrado token, Discord bot token, and channel mappings.
