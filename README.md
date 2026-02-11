@@ -216,7 +216,7 @@ class Config:
     EMBED_IMAGE = ""                # Optional thumbnail for embeds
     EMBED_FOOTER = "Your Server Name"  # Displayed at bottom of all embeds
     EMBED_FOOTER_IMAGE = ""         # Footer icon URL
-    EMBED_COLOR = ''                # Hex color for embeds, e.g., 0xE40000
+    EMBED_COLOR = 0xE40000                # Hex color for embeds
 ```
 
 Make sure all tokens are valid and quotes are used properly.
