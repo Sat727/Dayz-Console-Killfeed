@@ -5,4 +5,4 @@ class Config:
     EMBED_IMAGE = ""
     EMBED_FOOTER = "Placeholder Server"
     EMBED_FOOTER_IMAGE = ''
-    EMBED_COLOR = ''
+    EMBED_COLOR = 0xE40000
