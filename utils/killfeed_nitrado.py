@@ -7,8 +7,12 @@ import logging
 import os
 from os import path
 from config import Config
+from utils.nitradoFuncs import NitradoFunctions
+
+Nitrado = NitradoFunctions()
 
 logger = logging.getLogger(__name__)
+
 
 
 async def fetch_server_log(server_id: int, server_maps: dict = None) -> bool:
@@ -45,13 +49,7 @@ async def fetch_server_log(server_id: int, server_maps: dict = None) -> bool:
             game_type = details["data"]["gameserver"]["game"].lower()
             
             # Determine map from server name
-            server_name = details["data"]["gameserver"].get("name", "").lower()
-            if "livonia" in server_name:
-                current_map = "livonia"
-            elif "namalsk" in server_name:
-                current_map = "namalsk"
-            else:
-                current_map = "chernarus"
+            current_map = await Nitrado.getMapFromSettings(server_id)
             
             if server_maps is not None:
                 server_maps[server_id] = current_map
@@ -126,7 +124,7 @@ def get_map_url(server_map: str = "chernarus") -> str:
     Get the DayZ map URL for a given map.
     
     Args:
-        server_map: Name of the map (chernarus, livonia, namalsk)
+        server_map: Name of the map (chernarus, livonia, sahkal)
     
     Returns:
         str: Base URL for the map
@@ -134,7 +132,7 @@ def get_map_url(server_map: str = "chernarus") -> str:
     map_urls = {
         "chernarus": "https://dayz.ginfo.gg/chernarusplus/#location=",
         "livonia": "https://dayz.ginfo.gg/livonia/#location=",
-        "namalsk": "https://dayz.ginfo.gg/namalsk/#location=",
+        "sahkal": "https://dayz.ginfo.gg/sahkal/#location=",
     }
     return map_urls.get(server_map.lower(), "https://dayz.ginfo.gg/chernarusplus/#location=")
 
@@ -237,7 +235,7 @@ def get_map_url(server_map: str = "chernarus") -> str:
     Get the DayZ map URL for a given map.
     
     Args:
-        server_map: Name of the map (chernarus, livonia, namalsk)
+        server_map: Name of the map (chernarus, livonia, sahkal)
     
     Returns:
         str: Base URL for the map
@@ -245,9 +243,9 @@ def get_map_url(server_map: str = "chernarus") -> str:
     map_urls = {
         "chernarus": "https://dayz.ginfo.gg/chernarusplus/#location=",
         "livonia": "https://dayz.ginfo.gg/livonia/#location=",
-        "namalsk": "https://dayz.ginfo.gg/namalsk/#location=",
+        "sahkal": "https://dayz.ginfo.gg/sahkal/#location=",
     }
-    return map_urls.get(server_map.lower(), "https://dayz.ginfo.gg/chernarusplus/#location=")
+    return map_urls.get(server_map.lower(), "https://dayz.ginfo.gg/chernarusplus/#location=") # Get the given map URL or default to Chernarus
 
 
 def can_use_locations(server_map: str = "chernarus") -> bool:

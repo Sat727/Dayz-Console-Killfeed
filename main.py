@@ -17,8 +17,12 @@ cogs = [
     'cogs.newkillfeed', 'cogs.commands'
 ]
 logging.debug("Loading cogs...")
+
+synced_once = False
+
 @bot.event
 async def on_ready():
+    global synced_once
     print("Bot Ready")
     s = await bot.application_info()
     if s.bot_public == True:

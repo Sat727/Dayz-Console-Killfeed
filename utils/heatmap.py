@@ -26,7 +26,7 @@ def create_custom_colormap():
         
     custom_colormap = np.array(colormap, dtype=np.uint8).reshape(256, 1, 3)
     return custom_colormap
-def generate_heatmap(background_path, playercoords):
+def generate_heatmap(background_path, playercoords, map_name="chernarus"):
     try:
         map_image = cv2.imread(background_path)
         if map_image is None:
@@ -34,13 +34,26 @@ def generate_heatmap(background_path, playercoords):
 
         height, width, _ = map_image.shape
 
-        x_scale_factor = width / 15360.0
-        y_scale_factor = height / 15360.0
+        # Map dimensions for coordinate scaling
+        map_dimensions = {
+            "chernarus": 15360.0,
+            "livonia": 12800.0,
+            "sahkal": 12800.0 #Placeholder value until actual map size is known
+        }
+        
+        map_size = map_dimensions.get(map_name.lower(), 15360.0)
+        
+        x_scale_factor = width / map_size
+        y_scale_factor = height / map_size
 
         heatmap = np.zeros((height, width), dtype=np.float32)
 
         for coord in playercoords:
-            x, y = int(coord[0] * x_scale_factor), int((15360 - coord[1]) * y_scale_factor)
+            # Livonia and Sakhal use X, Z; Chernarus uses X, Y
+            if map_name.lower() in ["livonia", "sakhal"]:
+                x, y = int(coord[0] * x_scale_factor), int((map_size - coord[2]) * y_scale_factor)
+            else:
+                x, y = int(coord[0] * x_scale_factor), int((map_size - coord[1]) * y_scale_factor)
             if 0 <= x < width and 0 <= y < height:
                 cv2.circle(heatmap, (x, y), radius=5, color=1, thickness=-1) 
 

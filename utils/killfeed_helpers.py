@@ -105,13 +105,13 @@ def extract_player_name(line: str) -> str:
 def extract_killer_victim(line: str) -> tuple:
     """
     Extract both killer and victim names from a kill event line.
-    Format: Player "VictimName" killed by Player "KillerName"
+    Format: Player "VictimName" (DEAD) (id=... pos=<...>) killed by Player "KillerName"
     
     Returns:
         Tuple: (killer_name, victim_name)
     """
-    # Extract victim first (appears before "killed by")
-    victim = re.search(r'Player\s+"([^"]+)"\s+killed by', line)
+    # Extract victim first (appears before "killed by", accounting for (DEAD) status and coordinates)
+    victim = re.search(r'Player\s+"([^"]+)"\s+(?:\(DEAD\))?\s*\(id=[^)]+\s+pos=<[^>]+>\)\s+killed by', line)
     victim = victim.group(1) if victim else ""
     
     # Extract killer (after "killed by Player")
@@ -200,7 +200,10 @@ async def new_logfile(filepath: str) -> bool:
 def is_mam_device_event(line: str) -> bool:
     """
     Check if log line is a MAM device data event containing device ID and account UID.
-    Format: [MAM] :: [NetworkServer::CheckMAMData] :: device: ... | account: ... 
+    Formats: 
+        - [MAM] :: [NetworkServer::CheckMAMData] :: device: ... | account: ... 
+        - [MAM] :: [NetworkServer::RegisterMAMData] :: device: ... | account: ...
+        - [MAM] :: [NetworkServer::RegisterMAMDataHelper] :: id1: ... | id2: ...
     
     Args:
         line: Log line to check
@@ -208,13 +211,28 @@ def is_mam_device_event(line: str) -> bool:
     Returns:
         Bool: True if this is a MAM device event
     """
-    return "[MAM]" in line and "[NetworkServer::CheckMAMData]" in line and "device:" in line and "account:" in line
+    if "[MAM]" not in line:
+        return False
+    
+    # Check for different MAM formats
+    has_register = "[NetworkServer::RegisterMAMData]" in line or "[NetworkServer::RegisterMAMDataHelper]" in line or "[NetworkServer::CheckMAMData]" in line
+    
+    if not has_register:
+        return False
+    
+    # Check for device indicators
+    has_device = ("device:" in line and "account:" in line) or ("id1:" in line and "id2:" in line)
+    
+    return has_device
 
 
 def extract_device_id_and_uid(line: str) -> tuple:
     """
     Extract device ID and account UID from a MAM log line.
-    Format: [MAM] :: [NetworkServer::CheckMAMData] :: device: VUZwoETj2mkhZSZuUxOg5T8jwr0TrB4R_pt4klUoRio= | account: 383C4A0D1E702B6598B37338975EA3DB61DBC6D2 | time: 1077797
+    Formats:
+        - [MAM] :: [NetworkServer::CheckMAMData] :: device: VUZwoETj2mkhZSZuUxOg5T8jwr0TrB4R_pt4klUoRio= | account: 383C4A0D1E702B6598B37338975EA3DB61DBC6D2 | time: 1077797
+        - [MAM] :: [NetworkServer::RegisterMAMData] :: device: nwQBlewhhiL1eDq6FnyQ8z5-1IHvtOEcZfl32JItLhU= | account: 1F2D7D5BA6A2956E3D1343E44EBA4DD7941DD562 | time: 27250172
+        - [MAM] :: [NetworkServer::RegisterMAMDataHelper] :: id1: nwQBlewhhiL1eDq6FnyQ8z5-1IHvtOEcZfl32JItLhU= | id2: 1F2D7D5BA6A2956E3D1343E44EBA4DD7941DD562 | time: 27250172
     
     Args:
         line: MAM log line
@@ -223,11 +241,24 @@ def extract_device_id_and_uid(line: str) -> tuple:
         Tuple: (device_id, uid) or (None, None) if extraction fails
     """
     try:
+        device_id = None
+        uid = None
+        
+        # Try standard format with device: and account:
         device_match = re.search(r'device:\s*([^\s|]+)', line)
         account_match = re.search(r'account:\s*([^\s|]+)', line)
         
-        device_id = device_match.group(1).strip() if device_match else None
-        uid = account_match.group(1).strip() if account_match else None
+        if device_match and account_match:
+            device_id = device_match.group(1).strip()
+            uid = account_match.group(1).strip()
+        else:
+            # Try RegisterMAMDataHelper format with id1: and id2:
+            id1_match = re.search(r'id1:\s*([^\s|]+)', line)
+            id2_match = re.search(r'id2:\s*([^\s|]+)', line)
+            
+            if id1_match and id2_match:
+                device_id = id1_match.group(1).strip()
+                uid = id2_match.group(1).strip()
         
         logger.debug(f"Extracted device_id: {device_id}, uid: {uid}")
         return device_id, uid
@@ -310,15 +341,16 @@ def get_player_from_connection_event(line: str) -> Tuple[str, str]:
 def extract_uid_from_state_machine_event(line: str) -> Tuple[str, str]:
     """
     Extract player name and UID from StateMachine log line.
-    Format: [StateMachine]: Player Tylerj85 (dpnid 789427168 uid 383C4A0D1E702B6598B37338975EA3DB61DBC6D2) Entering ...
+    Format: [StateMachine]: Player Anarchy Dubz966 (dpnid 26602006 uid 1F2D7D5BA6A2956E3D1343E44EBA4DD7941DD562) Entering ...
     
     Returns:
         Tuple: (player_name, uid) or ("", "") if not found
     """
     try:
         # Extract player name and uid from StateMachine line
-        # Format: [StateMachine]: Player PlayerName (dpnid ... uid UID) 
-        match = re.search(r'\[StateMachine\]: Player\s+([^\s(]+)\s+\(dpnid\s+\d+\s+uid\s+([A-F0-9]*)\)', line)
+        # Format: [StateMachine]: Player PlayerName (dpnid ... uid UID)
+        # Using (.+?) for non-greedy match to handle player names with spaces
+        match = re.search(r'\[StateMachine\]: Player\s+(.+?)\s+\(dpnid\s+\d+\s+uid\s+([A-F0-9]*)\)', line)
         
         if match:
             player = match.group(1).strip()
@@ -328,3 +360,54 @@ def extract_uid_from_state_machine_event(line: str) -> Tuple[str, str]:
         logger.error(f"Error extracting UID from StateMachine event: {e}")
     
     return "", ""
+
+
+def extract_player_and_uid_from_char_debug(line: str) -> Tuple[str, str, str]:
+    """
+    Extract player name, UID, and DPNID from CHAR_DEBUG log line.
+    Format 1 (with name): CHAR_DEBUG - SAVE ... player PlayerName (dpnid = 26602006)
+    Format 2 (UID only): CHAR_DEBUG - EXIT ... player 1F2D7D5BA6A2956E3D1343E44EBA4DD7941DD562 (dpnid = 26602006)
+    
+    Returns:
+        Tuple: (player_name, uid, dpnid) or ("", "", "") if not found
+    """
+    try:
+        # Extract DPNID (always present)
+        dpnid_match = re.search(r'dpnid\s*=\s*(\d+)', line)
+        dpnid = dpnid_match.group(1).strip() if dpnid_match else ""
+        
+        # Check for UID format (40-char hex string)
+        uid_match = re.search(r'player\s+([A-F0-9]{40})\s+\(dpnid', line)
+        if uid_match:
+            uid = uid_match.group(1).strip()
+            return "", uid, dpnid  # Only UID and DPNID available
+        
+        # Check for player name format
+        name_match = re.search(r'player\s+([^\s(]+)\s+\(dpnid', line)
+        if name_match:
+            player = name_match.group(1).strip()
+            return player, "", dpnid  # Player name and DPNID available
+    except Exception as e:
+        logger.error(f"Error extracting from CHAR_DEBUG: {e}")
+    
+    return "", "", ""
+
+
+def extract_uid_from_disconnect(line: str) -> str:
+    """
+    Extract UID from Disconnect log line.
+    Format: [Disconnect]: Finish script disconnect DPNID (1F2D7D5BA6A2956E3D1343E44EBA4DD7941DD562)
+    
+    Returns:
+        String: UID or empty string if not found
+    """
+    try:
+        # Match UID in parentheses after disconnect message
+        uid_match = re.search(r'\([A-F0-9]{40}\)', line)
+        if uid_match:
+            uid = uid_match.group(0).strip('()')
+            return uid
+    except Exception as e:
+        logger.error(f"Error extracting UID from Disconnect: {e}")
+    
+    return ""

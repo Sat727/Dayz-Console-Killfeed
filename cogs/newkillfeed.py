@@ -30,10 +30,12 @@ class Killfeed(commands.Cog):
         self.headers = {"Authorization": f"Bearer {Config.NITRADO_TOKEN}"}
         self.FirstTime = True
         self.server_iterator = 0
-        self.testing = False
+        self.testing = True
         self.last_updated_server = None
         self.task_started = False  # Flag to prevent duplicate task starts
         self.uid_to_player = {}  # Track UID to player name mapping for alt detection
+        self.dpnid_to_player = {}  # Track DPNID to player name mapping from CHAR_DEBUG
+        self.dpnid_to_uid = {}  # Track DPNID to UID mapping from CHAR_DEBUG
         self.processed_rpt_entries = {}  # Track processed RPT entries per server to avoid duplicates
 
     async def safe_edit_channel(self, channel, **kwargs):
@@ -59,6 +61,7 @@ class Killfeed(commands.Cog):
         """
         if self.testing:
             log_acquired = True
+            self.FirstTime = False
         tasks_to_run = []
 
         # Use consolidated database
@@ -92,11 +95,16 @@ class Killfeed(commands.Cog):
             if log_acquired:
                 server_map = self.server_maps.get(server_id, "chernarus").lower()
                 # Process RPT for device IDs first, then process ADM log
+                # This may need improvement to avoid redundant file reads (This is the best implementation I could think of for now)
                 alt_accounts, banned_devices = await self.process_rpt_log_for_device_ids(server_id)
+                server_map = await Nitrado.getMapFromSettings(server_id)
+                server_map = server_map.lower()
+                logger.info(f"Initializing log check for server {server_id} on map {server_map}")
                 tasks_to_run.append(self.check_server_log(server_id, channel_map, server_map, alt_accounts, banned_devices))
 
         await asyncio.gather(*tasks_to_run)
 
+    # Loop each server every 5 minutes
     @tasks.loop(minutes=5)
     async def fetch_logs(self):
         try:
@@ -158,6 +166,32 @@ class Killfeed(commands.Cog):
                             # Ensure player exists in stats table
                             killfeed_database.check_user_exists(cursor, player_name, conn)
                             logger.debug(f"[{server_id}] Mapped UID {uid} to player {player_name}")
+                    
+                    # Check for CHAR_DEBUG events to map player name or UID
+                    elif "CHAR_DEBUG" in line:
+                        player_name, uid, dpnid = killfeed_helpers.extract_player_and_uid_from_char_debug(line)
+                        if dpnid:
+                            if player_name:
+                                # Store player name for this DPNID
+                                self.dpnid_to_player[dpnid] = player_name
+                                killfeed_database.check_user_exists(cursor, player_name, conn)
+                                logger.debug(f"[{server_id}] Found player {player_name} with DPNID {dpnid}")
+                            elif uid:
+                                # Store UID for this DPNID, then try to link with previously seen player name
+                                self.dpnid_to_uid[dpnid] = uid
+                                if dpnid in self.dpnid_to_player:
+                                    player_name = self.dpnid_to_player[dpnid]
+                                    self.uid_to_player[uid] = player_name
+                                    logger.debug(f"[{server_id}] Linked UID {uid} to player {player_name} via DPNID {dpnid}")
+                                else:
+                                    logger.debug(f"[{server_id}] Found UID {uid} with DPNID {dpnid} (player name not yet seen)")
+                    
+                    # Check for Disconnect events to extract UID
+                    elif "[Disconnect]:" in line and "Finish script disconnect" in line:
+                        uid = killfeed_helpers.extract_uid_from_disconnect(line)
+                        if uid and uid not in self.uid_to_player:
+                            # UID found in disconnect, store it (will be linked to player via MAM later)
+                            logger.debug(f"[{server_id}] Found UID {uid} from Disconnect event")
                     
                     # Check for MAM device events to get device ID and link to player
                     elif killfeed_helpers.is_mam_device_event(line):
@@ -621,7 +655,7 @@ class Killfeed(commands.Cog):
                             # Get location if available
                             location = ""
                             if can_use_locations:
-                                location = getClosestLocation(victim_coords) if victim_coords else ""
+                                location = getClosestLocation(victim_coords, server_map) if victim_coords else ""
 
                             # Extract weapon
                             weapon = killfeed_helpers.extract_weapon(line, Weapons.weapons)
@@ -629,20 +663,15 @@ class Killfeed(commands.Cog):
                             # Extract distance
                             distance = killfeed_helpers.extract_distance(line)
 
-                            # Create embed
+                            # Create embed with coordinate links
                             embed = await killfeed_events.create_pvp_kill_embed(
                                 player_killer, player_killed, weapon, distance, current_bodypart,
-                                timestamp_str, killer_stats, victim_stats, timealivestr, dayz
+                                timestamp_str, killer_stats, victim_stats, timealivestr, dayz,
+                                killer_coords, victim_coords, enable_coord_links=True
                             )
-                            
-                            # Add coordinate links if available
-                            if killer_coords and victim_coords:
-                                embed.description = embed.description.replace(
-                                    "**[Killer]" ,
-                                    f"**[Killer]({dayz + killer_coords}) - [Victim]({dayz + victim_coords})**"
-                                )
 
                             if channel_map["kill"] and not self.FirstTime:
+                                print("Sending kill data")
                                 await channel_map["kill"].send(embed=embed)
 
                         except Exception as e:
@@ -704,11 +733,13 @@ class Killfeed(commands.Cog):
             self.FirstTime = False
             print("FirstTime flag reset after all servers processed.")
 
-        # Generate heatmap (only for Chernarus and only if there's new location data)
+        # Generate heatmap (only if there's new location data)
         unique_locations = list({coord for coord in player_coords})
-        if channel_map["heatmap"] and server_map == "chernarus" and len(unique_locations) > 0 and counter_activity > 0:
+        if channel_map["heatmap"] and len(unique_locations) > 0 and counter_activity > 0:
             try:
-                generate_heatmap('./utils/y.jpg', unique_locations)
+                image_file = './utils/l.jpg' if server_map == "livonia" else './utils/y.jpg'
+                
+                generate_heatmap(image_file, unique_locations, server_map)
                 heatmap_embed = discord.Embed(
                     title="Player Location Heatmap",
                     description=f"Entries: {len(unique_locations)}\n<t:{int(time.mktime(datetime.now().timetuple()))}:R>",

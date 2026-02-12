@@ -20,7 +20,10 @@ async def create_pvp_kill_embed(
     killer_stats: dict,
     victim_stats: dict,
     timealive_str: str,
-    dayz_map_url: str
+    dayz_map_url: str,
+    killer_coords: str = "",
+    victim_coords: str = "",
+    enable_coord_links: bool = False
 ) -> discord.Embed:
     """
     Create a Discord embed for a PvP kill event.
@@ -41,18 +44,39 @@ async def create_pvp_kill_embed(
         discord.Embed: The embed for the kill
     """
     try:
-        killer_kd = round(killer_stats['kills'] / killer_stats['deaths'], 2) if killer_stats['deaths'] > 0 else float(killer_stats['kills'])
-        victim_kd = round(victim_stats['kills'] / victim_stats['deaths'], 2) if victim_stats['deaths'] > 0 else float(victim_stats['kills'])
+        # Safely get stats with defaults for new/unknown players
+        killer_kills = killer_stats.get('kills', 0)
+        killer_deaths = killer_stats.get('deaths', 0)
+        victim_kills = victim_stats.get('kills', 0)
+        victim_deaths = victim_stats.get('deaths', 0)
         
-        description = f"""**{killer}** killed **{victim}**
+        killer_kd = round(killer_kills / killer_deaths, 2) if killer_deaths > 0 else float(killer_kills)
+        victim_kd = round(victim_kills / victim_deaths, 2) if victim_deaths > 0 else float(victim_kills)
+        
+        # Get other stats with safe defaults
+        killer_rank = killer_stats.get('rank', 0)
+        killer_killstreak = killer_stats.get('killstreak', 0)
+        victim_rank = victim_stats.get('rank', 0)
+        victim_deathstreak = victim_stats.get('deathstreak', 0)
+        
+        # Build killer/victim names with optional coordinate links
+        killer_name = killer
+        victim_name = victim
+        if enable_coord_links:
+            if killer_coords:
+                killer_name = f"[{killer}]({dayz_map_url}{killer_coords})"
+            if victim_coords:
+                victim_name = f"[{victim}]({dayz_map_url}{victim_coords})"
+        
+        description = f"""**{killer_name}** killed **{victim_name}**
 
 **Weapon**: `{weapon}` ({distance}m) {'hit' if bodypart else ''} {bodypart}
 **{killer}'s Stats**:
-K/D - {killer_kd} | {killer_stats['deaths']} Death{'s' if killer_stats['deaths'] > 1 else ''} {killer_stats['kills']} Kill{'s' if killer_stats['kills'] > 1 else ''} | Ranked #{killer_stats['rank']} Kills
-Killstreak - {killer_stats['killstreak']}
+K/D - {killer_kd} | {killer_deaths} Death{'s' if killer_deaths > 1 else ''} {killer_kills} Kill{'s' if killer_kills > 1 else ''} | Ranked #{killer_rank} Kills
+Killstreak - {killer_killstreak}
 **{victim}'s Stats:**
-K/D - {victim_kd} | {victim_stats['deaths']} Death{'s' if victim_stats['deaths'] > 1 else ''} {victim_stats['kills']} Kill{'s' if victim_stats['kills'] > 1 else ''} | Ranked #{victim_stats['rank']} Deaths
-DeathStreak - {victim_stats['deathstreak']}
+K/D - {victim_kd} | {victim_deaths} Death{'s' if victim_deaths > 1 else ''} {victim_kills} Kill{'s' if victim_kills > 1 else ''} | Ranked #{victim_rank} Deaths
+DeathStreak - {victim_deathstreak}
 {'Time Alive - ' if int(int(victim_stats.get('alive_seconds', 0)) + victim_stats.get('alive_hours', 0) + victim_stats.get('alive_minutes', 0) + victim_stats.get('alive_days', 0)) > 0 else ''}{timealive_str}
 """
         

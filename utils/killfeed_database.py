@@ -139,6 +139,19 @@ def initialize_master_db(db_path: str = KILLFEED_DB_PATH) -> Tuple[sqlite3.Conne
             )
         """)
         
+        # Guild settings table
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS guild_settings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id INTEGER NOT NULL,
+                setting_key TEXT NOT NULL,
+                setting_value TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(guild_id, setting_key)
+            )
+        """)
+        
         # Add server_id column to existing config table if it doesn't have it
         cursor.execute("PRAGMA table_info(config)")
         columns = [col[1] for col in cursor.fetchall()]
@@ -333,14 +346,15 @@ def get_player_stats(cursor, player: str) -> Dict[str, Any]:
         ).fetchall()
         
         if result:
+            rank = result[0][11] if result[0][11] is not None and result[0][11] > 0 else 1
             return {
                 'user': result[0][1],  # Adjusted for new schema with id column
-                'kills': result[0][2],
-                'deaths': result[0][3],
-                'alivetime': result[0][4],
-                'killstreak': result[0][6],
-                'deathstreak': result[0][5],
-                'rank': result[0][11] if result[0][11] > 0 else 1
+                'kills': result[0][2] if result[0][2] is not None else 0,
+                'deaths': result[0][3] if result[0][3] is not None else 0,
+                'alivetime': result[0][4] if result[0][4] is not None else 0,
+                'killstreak': result[0][6] if result[0][6] is not None else 0,
+                'deathstreak': result[0][5] if result[0][5] is not None else 0,
+                'rank': rank
             }
         return {}
     except Exception as e:
@@ -838,3 +852,68 @@ def get_server_logs(server_id: str, db_path: str = KILLFEED_DB_PATH):
     except Exception as e:
         logger.error(f"Error getting server logs: {e}")
         return []
+
+
+# Guild settings functions
+def get_guild_setting(guild_id: int, setting_key: str, default: any = None, db_path: str = KILLFEED_DB_PATH) -> any:
+    """
+    Get a guild setting value.
+    
+    Args:
+        guild_id: Discord guild ID
+        setting_key: Setting key name
+        default: Default value if setting doesn't exist
+    
+    Returns:
+        Setting value or default
+    """
+    try:
+        conn = get_connection(db_path)
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT setting_value FROM guild_settings WHERE guild_id = ? AND setting_key = ?",
+            (guild_id, setting_key)
+        )
+        result = cursor.fetchone()
+        conn.close()
+        
+        if result:
+            # Try to convert string back to proper type
+            value = result[0]
+            if value.lower() == 'true':
+                return True
+            elif value.lower() == 'false':
+                return False
+            try:
+                return int(value)
+            except ValueError:
+                return value
+        return default
+    except Exception as e:
+        logger.error(f"Error getting guild setting: {e}")
+        return default
+
+
+def set_guild_setting(guild_id: int, setting_key: str, setting_value: any, db_path: str = KILLFEED_DB_PATH) -> None:
+    """
+    Set a guild setting value.
+    
+    Args:
+        guild_id: Discord guild ID
+        setting_key: Setting key name
+        setting_value: Value to set
+    """
+    try:
+        conn = get_connection(db_path)
+        cursor = conn.cursor()
+        # Convert value to string for storage
+        str_value = str(setting_value)
+        cursor.execute(
+            "INSERT OR REPLACE INTO guild_settings (guild_id, setting_key, setting_value, updated_at) VALUES (?, ?, ?, CURRENT_TIMESTAMP)",
+            (guild_id, setting_key, str_value)
+        )
+        conn.commit()
+        conn.close()
+        logger.debug(f"Set guild {guild_id} setting {setting_key} = {setting_value}")
+    except Exception as e:
+        logger.error(f"Error setting guild setting: {e}")

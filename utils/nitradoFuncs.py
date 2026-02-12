@@ -12,6 +12,31 @@ class NitradoFunctions():
             async with ses.get(f"https://api.nitrado.net/services/{id}/gameservers", headers=headers) as e:
                 return await e.content.read()
 
+    async def getMapFromSettings(self, id):
+        """Extract map name from Nitrado API settings response"""
+        try:
+            data = await self.getSettings(id)
+            settings_dict = json.loads(data)
+            
+            # Try to get map from query section first
+            map_value = settings_dict['data']['gameserver']['query'].get('map', '')
+            
+            # Extract map name from full mission string (e.g., "dayzOffline.chernarusplus" -> "chernarus")
+            if map_value:
+                if 'livonia' in map_value.lower():
+                    return 'livonia'
+                elif 'chernarusplus' in map_value.lower() or 'chernarus' in map_value.lower():
+                    return 'chernarus'
+                elif 'sakhal' in map_value.lower() or 'sahkhal' in map_value.lower():
+                    return 'sahkal'
+            
+            print(f"Applying for {map_value}")
+            
+            return 'chernarus'  # Default to Chernarus
+        except Exception as e:
+            print(f"Error extracting map from settings: {e}")
+            return 'chernarus'  # Default to Chernarus on error
+
     async def postSetting(self, category, key, value, id):
         headers = {"Authorization": f"Bearer {Config.NITRADO_TOKEN}"}
         data = {

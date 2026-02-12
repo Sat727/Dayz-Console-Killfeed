@@ -170,14 +170,17 @@ class Commands(commands.Cog):
         self.bot = bot
         logging.basicConfig(level=logging.INFO)
         self.categories = categories
-        #self.synced = False
+        self.synced = False
 
     @commands.Cog.listener()
     async def on_ready(self):
         print("Commands Ready")
-        
-        #await self.tree.sync()
-        #print("Synced")
+        try:
+            guild = discord.Object(id=Config.GUILD_ID)
+            fmt = await self.bot.tree.sync(guild=guild)
+            print(f"Synced {len(fmt)} commands to guild {Config.GUILD_ID}")
+        except Exception as e:
+            print(f"WARNING: Failed to sync commands to guild {Config.GUILD_ID}: {e}")
 
     @app_commands.checks.has_permissions(administrator=True)
     @commands.command()
@@ -190,7 +193,7 @@ class Commands(commands.Cog):
     async def addarea(self, interaction:discord.Interaction, x_coord:float, z_coord:float, radius:int, channel:discord.TextChannel, name:str):
         regions = killfeed_database.get_regions()
         if len(regions) > 25:
-            await interaction.response.send_message("You have more than 25 events. The limit is 25")
+            await interaction.response.send_message("You have more than 25 events. Please remove some before adding more.")
         else:
             killfeed_database.insert_region(x_coord, z_coord, radius, channel.id, name)
             await interaction.response.send_message(f"Listening to flags at {x_coord} {z_coord} and posting to {channel}")
@@ -1190,13 +1193,25 @@ class Commands(commands.Cog):
             )
             playercoords = []
             try:
+                # Get map from Nitrado API
+                detected_map = await Nitrado.getMapFromSettings(serverid)
+                
+                # Read coordinates from log file
                 async with aiofiles.open(fp, mode="r") as f:
                     async for line in f:
                         coordlog = re.search(r'Player ".*?" \(id=.*? pos=<(\d+\.\d+), (\d+\.\d+), (\d+\.\d+)>\)', line)
                         if coordlog:
-                            x, y, _ = list(coordlog.groups())  # Extracting x and y coordinates only
-                            playercoords.append((float(x), float(y)))
-                generate_heatmap('./utils/y.jpg', playercoords)
+                            x, y, z = list(coordlog.groups())
+                            playercoords.append((float(x), float(y), float(z)))
+                
+                # Use correct image based on detected map
+                if detected_map == "livonia":
+                    image_file = './utils/l.jpg'
+                elif detected_map == "sakhal":
+                    image_file = './utils/s.jpg'
+                else:
+                    image_file = './utils/y.jpg'
+                generate_heatmap(image_file, playercoords, detected_map)
                 embed = discord.Embed(title="Player Location Heatmap (All)",description=f'Entries: {len(playercoords)}', color=0xE40000).set_image(url="attachment://heatmap.jpg")
                 await cb_interaction.followup.send(embed=embed, file=discord.File("heatmap.jpg"))
                 await cb_interaction.message.edit(content=f"Heatmap generated for server `{serverid}`")
@@ -1450,5 +1465,27 @@ class Commands(commands.Cog):
         await interaction.response.send_message(embed=embed)
 
 
+    @app_commands.checks.has_permissions(administrator=True)
+    @app_commands.command(name="togglecoordlinks", description="Toggle coordinate links in kill embeds")
+    async def toggle_coord_links(self, interaction: discord.Interaction):
+        """Toggle whether coordinate links are shown in kill embeds"""
+        # Get current setting from database
+        guild_id = interaction.guild_id
+        current_setting = killfeed_database.get_guild_setting(guild_id, "enable_coord_links", True)
+        
+        # Toggle it
+        new_setting = not current_setting
+        killfeed_database.set_guild_setting(guild_id, "enable_coord_links", new_setting)
+        
+        status = "enabled" if new_setting else "disabled"
+        embed = discord.Embed(
+            title="Coordinate Links",
+            description=f"Coordinate links in kill embeds have been **{status}**",
+            color=0xE40000
+        )
+        await interaction.response.send_message(embed=embed)
+
+
 async def setup(bot):
     await bot.add_cog(Commands(bot))
+
