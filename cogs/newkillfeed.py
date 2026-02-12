@@ -30,7 +30,7 @@ class Killfeed(commands.Cog):
         self.headers = {"Authorization": f"Bearer {Config.NITRADO_TOKEN}"}
         self.FirstTime = True
         self.server_iterator = 0
-        self.testing = True
+        self.testing = False
         self.last_updated_server = None
         self.task_started = False  # Flag to prevent duplicate task starts
         self.uid_to_player = {}  # Track UID to player name mapping for alt detection
